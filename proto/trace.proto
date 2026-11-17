@@ -1,0 +1,73 @@
+syntax = "proto3";
+
+package flowtrace.v1;
+
+// 上报通道
+enum Channel {
+  CHANNEL_UNSPECIFIED = 0;  // 非法，拒收
+  CHANNEL_REALTIME = 1;     // 实时通道（小批 ≤50 点，任意网络）
+  CHANNEL_BACKFILL = 2;     // 补传通道（大批 ≤500 点，WiFi+充电）
+}
+
+// 定位来源
+enum LocationSource {
+  SOURCE_UNSPECIFIED = 0;
+  SOURCE_GPS = 1;
+  SOURCE_NETWORK = 2;
+  SOURCE_FUSED = 3;         // 缺省按 FUSED 处理
+  SOURCE_MANUAL = 4;        // 用户手动打点/纠偏
+}
+
+// 点级标志位（bit 掩码，可组合）
+// 0x01 FLAG_ENTER_RADIUS   进入巡检点/围栏半径（关键点，触发实时上报）
+// 0x02 FLAG_EXIT_RADIUS    离开半径
+// 0x04 FLAG_MOTION_CHANGE  运动状态切换
+// 0x08 FLAG_FORCED         强制保留点（关键点优先策略）
+// 0x10 FLAG_LOW_BATTERY    低电量模式下采集
+
+// 批头基准值：批内点做增量编码，坐标整数量化（×1e7）
+message GeoBase {
+  int64 ts_ms = 1;   // epoch 毫秒
+  sint64 lat_q = 2;  // 纬度 ×1e7（= round(度 × 10^7)）
+  sint64 lng_q = 3;  // 经度 ×1e7
+}
+
+message SdkInfo {
+  string sdk_version = 1;   // 语义化版本，如 "1.2.0"
+  string app_version = 2;   // 宿主 App 版本
+  string platform = 3;      // "android" | "ios"
+  string os_version = 4;    // 系统版本，如 "17.4" / "34"
+  string model = 5;         // 机型（可选，如 "Pixel 8"）
+}
+
+message TraceBatchHeader {
+  string batch_id = 1;       // 【必填】UUIDv7，全局唯一，幂等键
+  string schema_version = 2; // 【必填】"1.0"；主版本不同拒收，次版本不同接受（向前兼容）
+  string device_id = 3;      // 【必填】必须与 token did 声明一致
+  string user_id = 4;        // 【必填】必须与 token sub 一致，否则拒收
+  string session_id = 5;     // 【可选】采集会话 ID（SDK start() 生成 UUIDv7）
+  string task_id = 6;        // 【可选】业务任务关联：透传存储，不做语义校验
+  GeoBase base = 7;          // 【必填】Delta 基准 = 本批首点绝对值
+  // 字段 8 暂未使用（原样保留编号）
+  SdkInfo sdk = 9;           // 【必填】
+  int64 client_ts_ms = 10;   // 【必填】编码时刻
+}
+
+// 批内点：相对前一点的链式增量（cur = prev + delta，prev₀ = header.base）
+message TracePointDelta {
+  sint64 d_ts = 1;           // ts_ms  差；首点 = 0（proto3 省略）
+  sint64 d_lat = 2;          // lat_q  差；首点 = 0
+  sint64 d_lng = 3;          // lng_q  差；首点 = 0
+  // 与 trace_message.AbsolutePoint 字段布局对齐（accuracy=4、speed=5）
+  int32 accuracy_cm = 4;     // 【可选】定位精度 cm（68% 置信）
+  float speed_mps = 5;       // 【可选】速度 m/s
+  int32 bearing_deg = 6;     // 【可选】航向 0..359
+  int32 altitude_cm = 7;     // 【可选】海拔 cm（WGS84）
+  LocationSource source = 8; // 【可选】缺省 FUSED
+  uint32 flags = 9;          // 【可选】位掩码（见文件顶部标志位定义）
+}
+
+message TraceBatchRequest {
+  TraceBatchHeader header = 1;
+  repeated TracePointDelta points = 2;  // 按 ts 升序，1..500 个
+}
