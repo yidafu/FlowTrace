@@ -1,0 +1,19 @@
+import org.gradle.api.initialization.resolve.RepositoriesMode
+
+pluginManagement { includeBuild("../node_modules/@react-native/gradle-plugin") }
+plugins { id("com.facebook.react.settings") }
+extensions.configure(com.facebook.react.ReactSettingsExtension){ ex -> ex.autolinkLibrariesFromCommand() }
+
+// 国内加速：依赖解析统一腾讯云镜像优先（PREFER_SETTINGS 忽略各工程自带仓库），官方源兜底
+dependencyResolutionManagement {
+    repositoriesMode = RepositoriesMode.PREFER_SETTINGS
+    repositories {
+        maven { url 'https://mirrors.cloud.tencent.com/nexus/repository/maven-public/' }
+        google()
+        mavenCentral()
+    }
+}
+
+rootProject.name = 'flowtrace.example'
+include ':app'
+includeBuild('../node_modules/@react-native/gradle-plugin')

@@ -1,0 +1,23 @@
+buildscript {
+    ext {
+        buildToolsVersion = "37.0.0"
+        minSdkVersion = 24
+        compileSdkVersion = 37
+        targetSdkVersion = 36
+        ndkVersion = "27.1.12297006"
+        kotlinVersion = "2.2.0"
+    }
+    repositories {
+        // 国内加速：腾讯云镜像优先，google/mavenCentral 兜底（与 backend 约定一致）
+        maven { url 'https://mirrors.cloud.tencent.com/nexus/repository/maven-public/' }
+        google()
+        mavenCentral()
+    }
+    dependencies {
+        classpath("com.android.tools.build:gradle")
+        classpath("com.facebook.react:react-native-gradle-plugin")
+        classpath("org.jetbrains.kotlin:kotlin-gradle-plugin")
+    }
+}
+
+apply plugin: "com.facebook.react.rootproject"
