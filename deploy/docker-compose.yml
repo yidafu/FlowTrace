@@ -1,0 +1,78 @@
+# FlowTrace 本地开发依赖：Kafka（轨迹主链路消息）+ Redis（最新位置/幂等/限流）
+# 与 docs/design/01-overview.md 的选型对齐：Kafka 3.x、Redis 7。
+#
+# 用法（podman ≥ 3；macOS 需 podman machine 处于运行状态）：
+#   podman compose up -d     # 拉起
+#   podman compose ps        # 查看状态
+#   podman compose down      # 停止（保留数据卷）
+#   podman compose down -v   # 停止并清空数据（Kafka/Redis 数据全丢，慎用）
+#
+# 连接地址：
+#   宿主机进程（本地跑 upload/processor/query 等服务）：
+#     Kafka bootstrap-servers = localhost:9092
+#     Redis                  = localhost:6379
+#   compose 网络内的容器：kafka:29092 / redis:6379
+#
+# 镜像源：默认走国内镜像（DaoCloud）；回官方源或换其他源：
+#   REGISTRY_MIRROR=docker.io podman compose up -d
+
+name: flowtrace
+
+services:
+  kafka:
+    image: ${REGISTRY_MIRROR:-docker.m.daocloud.io}/apache/kafka:3.9.0
+    container_name: flowtrace-kafka
+    hostname: kafka
+    restart: unless-stopped
+    # KRaft 单节点（broker + controller 合一，免 ZooKeeper）
+    # CLUSTER_ID 不设置：镜像首次格式化时自动生成并持久化到数据卷
+    environment:
+      KAFKA_NODE_ID: 1
+      KAFKA_PROCESS_ROLES: broker,controller
+      # 三组监听：INTERNAL 供容器互访，HOST 供宿主机接入，CONTROLLER 供 KRaft。
+      # Kafka 3.9 起（KIP-853）CONTROLLER 监听器不能绑 0.0.0.0，需用可路由主机名
+      KAFKA_LISTENERS: INTERNAL://0.0.0.0:29092,HOST://0.0.0.0:9092,CONTROLLER://kafka:29093
+      KAFKA_ADVERTISED_LISTENERS: INTERNAL://kafka:29092,HOST://localhost:9092
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: INTERNAL:PLAINTEXT,HOST:PLAINTEXT,CONTROLLER:PLAINTEXT
+      KAFKA_INTER_BROKER_LISTENER_NAME: INTERNAL
+      KAFKA_CONTROLLER_LISTENER_NAMES: CONTROLLER
+      KAFKA_CONTROLLER_QUORUM_VOTERS: 1@kafka:29093
+      # 单节点，副本数固定 1
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
+      KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS: 0
+      # 开发环境自动建 topic（如 trace.batch.v1）；默认 8 分区够本地调试，
+      # 生产拓扑（32 分区）见 docs/design/01-overview.md §8
+      KAFKA_AUTO_CREATE_TOPICS_ENABLE: "true"
+      KAFKA_NUM_PARTITIONS: 8
+    ports:
+      - "9092:9092"
+    volumes:
+      - kafka-data:/var/lib/kafka/data
+    healthcheck:
+      test: ["CMD-SHELL", "/opt/kafka/bin/kafka-broker-api-versions.sh --bootstrap-server localhost:9092 > /dev/null 2>&1"]
+      interval: 10s
+      timeout: 10s
+      retries: 12
+      start_period: 30s
+
+  redis:
+    image: ${REGISTRY_MIRROR:-docker.m.daocloud.io}/library/redis:7-alpine
+    container_name: flowtrace-redis
+    restart: unless-stopped
+    # 最新位置 rt:pos:* / 幂等键 idem:batch:* 丢了可重建，但开发中重启丢数据烦人，开 AOF
+    command: ["redis-server", "--appendonly", "yes"]
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis-data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 12
+
+volumes:
+  kafka-data:
+  redis-data:
