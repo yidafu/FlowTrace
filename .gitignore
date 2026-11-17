@@ -1,0 +1,15 @@
+# macOS
+.DS_Store
+
+# IDE
+.idea/
+*.iml
+.vscode/
+
+# Gradle / Kotlin 构建产物（含 build/generated 下的 protobuf 生成代码）
+.gradle/
+build/
+
+# Node
+node_modules/
+sdk/react-native-flowtrace/.yarn/releases/yarn-4.18.1.cjs
