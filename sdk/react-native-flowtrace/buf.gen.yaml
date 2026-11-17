@@ -1,0 +1,14 @@
+# SDK 侧 Protobuf TS 生成配置（Protobuf ES v2）
+# 协议事实源在仓库根目录 proto/，只生成对外上报协议 trace.proto（trace_message.proto 为服务端内部消息）
+# 注意：inputs.paths 相对 buf.gen.yaml 所在目录（context dir）解析，而非输入根目录，故写完整相对路径
+# 运行：yarn proto:generate
+version: v2
+inputs:
+  - directory: ../../proto
+    paths:
+      - ../../proto/trace.proto
+plugins:
+  - local: protoc-gen-es
+    out: src/transport/generated
+    opt:
+      - target=ts
