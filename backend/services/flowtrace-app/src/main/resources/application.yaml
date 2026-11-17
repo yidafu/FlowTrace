@@ -1,0 +1,97 @@
+# FlowTrace 默认配置 —— 口径契约见 docs/design/07-deploy-observability.md §3
+# 敏感项（凭据）以 ${ENV:默认值} 占位符引用部署注入的环境变量，不在本文件写死；
+# 所有键均可被环境变量按 relaxed binding 覆盖（如 flowtrace.upload.topic -> FLOWTRACE_UPLOAD_TOPIC，
+# 注意连字符会被去掉：ts-window-rt-past-ms -> FLOWTRACE_UPLOAD_TSWINDOWRTPASTMS）。
+
+spring:
+  application:
+    name: flowtrace-app
+  datasource:
+    # PostgreSQL 本地另行安装（07 §1.1）；URL 按写入路径约定带 reWriteBatchedInserts（06 §39）
+    url: ${DB_URL:jdbc:postgresql://localhost:5432/flowtrace?reWriteBatchedInserts=true}
+    username: ${DB_USER:flowtrace}
+    password: ${DB_PASSWORD:}          # 凭据不写死：本地经环境变量注入，生产走 Secret
+    hikari:
+      maximum-pool-size: 10            # 原 DB_POOL_MAX（Hikari 默认）
+  data:
+    redis:
+      url: ${REDIS_URL:redis://localhost:6379}
+  kafka:
+    bootstrap-servers: ${KAFKA_BOOTSTRAP:localhost:9092}
+
+server:
+  port: 8080
+
+logging:
+  level:
+    root: ${LOG_LEVEL:info}
+    dev.yidafu.flowtrace: info
+
+management:
+  tracing:
+    sampling:
+      probability: 0.1                 # 入口 10% + 错误全采（07 §5）
+  otlp:
+    tracing:
+      endpoint: ${OTEL_ENDPOINT:http://localhost:4318/v1/traces}
+
+flowtrace:
+  auth:
+    jwks-issuer:                       # 部署期必填（外部 IdP 签发，服务仅持 JWKS 公钥）
+    jwks-cache-ttl-sec: 300
+  upload:
+    topic: trace.batch.v1
+    limit-batch-per-min-rt: 12         # 实时通道 批次/分钟
+    limit-batch-per-min-bf: 6          # 补传通道 批次/分钟
+    limit-points-per-min: 6000
+    degrade-threshold-pct: 90
+    degrade-windows: 10
+    degraded-factor: 2
+    payload-max-bytes: 262144          # 256KB
+    gunzip-max-bytes: 2097152
+    ts-window-rt-past-ms: 172800000    # 2d
+    ts-window-bf-past-ms: 604800000    # 7d
+    ts-window-future-ms: 600000        # 10min
+    interval-base-sec: 30
+    interval-high-sec: 60
+    interval-veryhigh-sec: 120
+    interval-limited-sec: 300
+    interval-min-sec: 10
+    interval-max-sec: 300
+  processor:
+    consumer-group: processor-group    # 与 realtime 分键，避免多模块单体撞名
+    concurrency: 32                    # 默认 = topic 分区数（07 §1.2 M3 基线 32）
+    poll-records: 100
+    watermark-drift-ms: 600000         # 10min 乱序水位窗口
+    clean-accuracy-cm: 10000
+    clean-accuracy-lone-ms: 600000
+    clean-speed-max-mps: 85
+    split-gap-ms: 600000
+    split-jump-m: 5000
+    stay-radius-m: 50
+    stay-min-ms: 300000
+    stay-merge-gap-ms: 120000
+    dp-storage-epsilon-m: 5
+    points-write-batch: 1000
+    dlq-max-retries: 3
+    recalc-lock-ttl-sec: 300
+    dirty-scan-interval-sec: 60
+  realtime:
+    consumer-group: realtime-group
+    pos-ttl-days: 30
+  query:
+    span-max-traces-days: 7
+    span-max-segments-days: 31
+    span-max-distance-days: 31
+    span-max-playback-days: 1
+    limit-points-default: 2000
+    limit-points-max: 5000
+    location-stale-ms: 300000
+  admin:
+    partition-precreate-days: 3
+    partition-cron: "0 5 0 * * *"
+    archive-enabled: true
+    archive-bucket: ${ARCHIVE_BUCKET:} # 对象存储凭据经 Secret 注入
+    retention-point-days: 30           # 全局默认，可被 USER 策略覆盖
+    retention-segment-days: 180
+    retention-archive-days: 365
