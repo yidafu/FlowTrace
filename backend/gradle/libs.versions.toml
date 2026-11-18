@@ -19,6 +19,8 @@ exposed-bom = { module = "org.jetbrains.exposed:exposed-bom", version.ref = "exp
 jts-core = { module = "org.locationtech.jts:jts-core", version.ref = "jts" }
 # Protobuf 运行时：trace-protocol 生成 Kotlin DSL 代码依赖（传递引入 protobuf-java）
 protobuf-kotlin = { module = "com.google.protobuf:protobuf-kotlin", version.ref = "protobuf" }
+# protobuf-java-util：proto JSON 映射（ProtobufJsonFormatHttpMessageConverter 的 application/json 支持）
+protobuf-java-util = { module = "com.google.protobuf:protobuf-java-util", version.ref = "protobuf" }
 
 [plugins]
 kotlin-jvm = { id = "org.jetbrains.kotlin.jvm", version.ref = "kotlin" }
