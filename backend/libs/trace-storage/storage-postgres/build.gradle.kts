@@ -6,6 +6,9 @@ dependencies {
     api(platform(libs.spring.boot.dependencies))
     api(platform(libs.exposed.bom))
     api(project(":libs:trace-model"))
+    // @Repository / @Configuration / CommandLineRunner 由 app 组件扫描装配
+    api("org.springframework:spring-context")
+    implementation("org.springframework.boot:spring-boot")
 
     api("org.jetbrains.exposed:exposed-core")
     api("org.jetbrains.exposed:exposed-jdbc")
