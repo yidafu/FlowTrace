@@ -9,8 +9,8 @@ spring:
   datasource:
     # PostgreSQL 本地另行安装（07 §1.1）；URL 按写入路径约定带 reWriteBatchedInserts（06 §39）
     url: ${DB_URL:jdbc:postgresql://localhost:5432/flowtrace?reWriteBatchedInserts=true}
-    username: ${DB_USER:flowtrace}
-    password: ${DB_PASSWORD:}          # 凭据不写死：本地经环境变量注入，生产走 Secret
+    username: ${DB_USER:postgres}
+    password: ${DB_PASSWORD:admin123}  # 测试环境明文默认值；生产务必用 Secret / 环境变量覆盖
     hikari:
       maximum-pool-size: 10            # 原 DB_POOL_MAX（Hikari 默认）
   data:
@@ -36,9 +36,18 @@ management:
       endpoint: ${OTEL_ENDPOINT:http://localhost:4318/v1/traces}
 
 flowtrace:
+  postgres:
+    ddl-auto: create               # none=不建表（默认，测试用）；create=启动时用 SchemaUtils.create 补建缺失表
   auth:
     jwks-issuer:                       # 部署期必填（外部 IdP 签发，服务仅持 JWKS 公钥）
     jwks-cache-ttl-sec: 300
+  kafka:
+    send-timeout-sec: 5                # upload 同步等待 Kafka 确认的超时，超时回滚幂等 key 并 5xx
+  log:
+    # 请求日志（platform/common HttpRequestLoggingFilter）
+    request-enabled: true              # 每个请求一行访问日志
+    payload-on-error: true             # 4xx/5xx 额外打印入参/出参（坐标已脱敏，07 §5）
+    max-payload-chars: 2048            # 单个载荷落日志的最大字符数，超出截断
   upload:
     topic: trace.batch.v1
     limit-batch-per-min-rt: 12         # 实时通道 批次/分钟

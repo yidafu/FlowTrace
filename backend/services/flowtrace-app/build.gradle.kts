@@ -8,8 +8,11 @@ plugins {
 dependencies {
     implementation(platform(libs.spring.boot.dependencies))
     implementation("org.jetbrains.kotlin:kotlin-reflect")
+    // DataSourceAutoConfiguration + HikariCP，供 Exposed 接入 application.yaml 的 spring.datasource.*
+    implementation("org.springframework.boot:spring-boot-starter-jdbc")
 
     implementation(project(":platform:common"))
+    implementation(project(":libs:trace-storage:storage-redis"))
     implementation(project(":services:flowtrace-upload"))
     implementation(project(":services:flowtrace-processor"))
     implementation(project(":services:flowtrace-query"))
