@@ -11,8 +11,8 @@
 
 ## 文件
 
-- `trace.proto`：对外上报协议（`flowtrace.v1`），SDK 与服务端共用。
-- `trace_message.proto`：Kafka 内部消息（`flowtrace.internal.v1`，点为绝对坐标），仅服务端（upload 写入 / processor 消费），不进 SDK。
+- `trace.proto`：对外上报协议（`dev.yidafu.flowtrace.v1`），SDK 与服务端共用。
+- `trace_message.proto`：Kafka 内部消息（`dev.yidafu.flowtrace.internal.v1`，点为绝对坐标），仅服务端（upload 写入 / processor 消费），不进 SDK。
 
 ## 代码生成
 

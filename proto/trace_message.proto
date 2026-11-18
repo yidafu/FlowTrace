@@ -1,6 +1,6 @@
 syntax = "proto3";
 
-package flowtrace.internal.v1;
+package dev.yidafu.flowtrace.internal.v1;
 
 // Kafka 内部消息（flowtrace-upload 写入，flowtrace-processor 消费），点为绝对坐标（×1e7）
 // topic trace.batch.v1 消息 value；Kafka 头：
