@@ -1,5 +1,10 @@
 plugins {
     alias(libs.plugins.kotlin.jvm)
+    // all-open：@Repository/@Component 等 Spring 注解的类必须可被 CGLIB 继承。
+    // Boot 4 的 spring-boot-persistence 会给每个 @Repository bean 挂
+    // PersistenceExceptionTranslationAdvisor（spring.aop.proxy-target-class 默认 true），
+    // 缺此插件时 Kotlin 类为 final，启动即报 "Could not generate CGLIB subclass"。
+    alias(libs.plugins.kotlin.spring)
 }
 
 dependencies {

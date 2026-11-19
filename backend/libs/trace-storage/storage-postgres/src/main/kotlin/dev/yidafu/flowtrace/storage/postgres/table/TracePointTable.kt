@@ -1,5 +1,8 @@
 package dev.yidafu.flowtrace.storage.postgres.table
 
+import dev.yidafu.flowtrace.model.LocationSource
+import dev.yidafu.flowtrace.model.TracePoint
+import org.jetbrains.exposed.v1.core.ResultRow
 import org.jetbrains.exposed.v1.core.Table
 import org.jetbrains.exposed.v1.javatime.CurrentTimestamp
 import org.jetbrains.exposed.v1.javatime.timestamp
@@ -49,3 +52,29 @@ object TracePointTable : Table("trace_point") {
         )
     }
 }
+
+/**
+ * 库行 → 领域对象：`trace_point` 行映射的**唯一入口**，查询仓储与
+ * `DeviceStateLoader`（processor 缓存 miss 恢复）共用，避免两处各写一份而漂移。
+ *
+ * 可选字段的「0 = 缺省」归一在写入侧（TracePoint → 库行）完成，这里只做空值与类型映射。
+ * 若将来按 03 §1 把时间列改成 `timestampWithTimeZone()`，只需改本函数的 `ts` 取值。
+ */
+fun ResultRow.toDomain(): TracePoint =
+    TracePoint(
+        tsMs = this[TracePointTable.ts].toEpochMilli(),
+        pointId = this[TracePointTable.pointId],
+        userId = this[TracePointTable.userId],
+        deviceId = this[TracePointTable.deviceId],
+        batchId = this[TracePointTable.batchId],
+        latQ = this[TracePointTable.latQ],
+        lngQ = this[TracePointTable.lngQ],
+        sessionId = this[TracePointTable.sessionId],
+        taskId = this[TracePointTable.taskId],
+        accuracyCm = this[TracePointTable.accuracyCm],
+        speedMps = this[TracePointTable.speedMps],
+        bearingDeg = this[TracePointTable.bearingDeg],
+        altitudeCm = this[TracePointTable.altitudeCm],
+        source = this[TracePointTable.locationSource]?.let { LocationSource.fromStored(it.toInt()) },
+        flags = this[TracePointTable.flags] ?: 0,
+    )

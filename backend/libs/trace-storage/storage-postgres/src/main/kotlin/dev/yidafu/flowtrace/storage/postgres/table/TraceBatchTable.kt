@@ -8,10 +8,14 @@ import org.jetbrains.exposed.v1.javatime.timestamp
  *
  * 按天 RANGE 分区（received_at），是分区主表的列映射事实源：
  * 主表 DDL 与按天子表由 PartitionManager（03 §7）创建，不纳入 SchemaUtils.create。
- * 幂等审计与对账用，非业务查询表；热路径幂等走 Redis SETNX，本表唯一索引是兜底与审计。
+ * 幂等审计与对账用，非业务查询表；热路径幂等走 Redis SETNX（06 §3.4），本表只做落库审计。
  *
- * 主键含分区键；received_at 唯一即 batch_id 唯一（一个 batchId 只有一个 received_at），
- * 用唯一索引显式声明 batchId 幂等语义。
+ * 主键含分区键 `(received_at, batch_id)`：PG 要求分区表的唯一约束必须覆盖全部分区键，
+ * 因此**不能再声明仅含 `batch_id` 的唯一索引**（建表时会报
+ * `unique constraint on partitioned table must include all partitioning columns`）。
+ * batchId 的全局唯一由两处保证：Redis `idem:batch:{batchId}` SETNX 挡住重复上报，
+ * 点级 `(ts, point_id)` 主键保证重复消费不产生重复数据；本表 `batch_id` 只建普通索引，
+ * 供 `findByBatchId` / 状态回写定位（各子表各建一份）。
  */
 object TraceBatchTable : Table("trace_batch") {
     val receivedAt = timestamp("received_at")
@@ -33,8 +37,8 @@ object TraceBatchTable : Table("trace_batch") {
 
     init {
         index(customIndexName = "trace_batch_device_received_idx", false, deviceId, receivedAt)
-        // batchId 全局唯一（幂等兜底）
-        index(customIndexName = "trace_batch_id_uidx", true, batchId)
+        // batchId 定位（幂等兜底在 Redis，见类注释；分区表上不能建仅含 batch_id 的唯一索引）
+        index(customIndexName = "trace_batch_id_idx", false, batchId)
         // 失败批扫描（重处理入口）
         index(
             customIndexName = "trace_batch_failed_idx",

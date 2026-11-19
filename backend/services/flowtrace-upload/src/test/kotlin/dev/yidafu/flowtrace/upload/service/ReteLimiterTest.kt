@@ -98,6 +98,8 @@ class ReteLimiterTest {
     private class InMemoryCache : FlowtraceCache {
         val counters = mutableMapOf<String, Long>()
 
+        override fun has(key: String): Boolean = counters.containsKey(key)
+
         override fun <T : Any> get(
             key: String,
             type: Class<T>,

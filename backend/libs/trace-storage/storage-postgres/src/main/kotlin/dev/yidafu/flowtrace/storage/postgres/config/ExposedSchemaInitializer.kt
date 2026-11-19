@@ -10,17 +10,17 @@ import org.springframework.boot.CommandLineRunner
 import org.springframework.stereotype.Component
 
 /**
- * 用 Exposed DSL（SchemaUtils.create）按 Table 对象建表，替代手写/生成 SQL 脚本。
+ * 启动期补建缺失的表，替代手写/生成 SQL 脚本。
  *
  * 默认关闭（ddl-auto=none）：app 启动测试无真实 PostgreSQL，开启会令启动期连库失败。
- * 置 flowtrace.postgres.ddl-auto=create 后，在应用启动后补建缺失的表；
- * SchemaUtils.create 幂等——只建不存在的表，不改动已有表结构。
- * 已有表的结构演进仍按 D16 走 exposed-migration，本初始化器只负责首次建表。
+ * 置 flowtrace.postgres.ddl-auto=create 后执行两类 DDL：
+ * 1. 非分区表（device / retention_policy / dirty_day）走 `SchemaUtils.create`；
+ * 2. 分区表（trace_point / trace_segment / trace_batch / audit_log）走 [PartitionedSchema]——
+ *    Exposed 建不出 `PARTITION BY RANGE`，交给 `SchemaUtils` 会建成无分区普通表，
+ *    后续拿不到 `DROP PARTITION` 过期删除与分区裁剪。
  *
- * 仅纳入非分区表（device / retention_policy / dirty_day）。分区表（trace_point /
- * trace_segment / trace_batch / audit_log）的 Table 对象只是列映射事实源，其主表
- * CREATE TABLE ... PARTITION BY 与分区子表由 PartitionManager（03 §7）运行时 DDL 创建，
- * 若交给 SchemaUtils 会建成无分区的普通表，破坏分区设计，故不在此处建。
+ * 两者都幂等：只建缺失的表/分区，不改动已有结构；已有表的结构演进仍按 D16 走
+ * exposed-migration，本初始化器只负责首次建表。
  */
 @Component
 class ExposedSchemaInitializer(
@@ -31,6 +31,7 @@ class ExposedSchemaInitializer(
         if (!ddlAuto.equals("create", ignoreCase = true)) return
         transaction {
             SchemaUtils.create(DeviceTable, RetentionPolicyTable, DirtyDayTable)
+            PartitionedSchema.createAll()
         }
     }
 }

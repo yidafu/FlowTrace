@@ -18,6 +18,8 @@ class RedisFlowtraceCache(
     private val redisTemplate: StringRedisTemplate,
     private val objectMapper: ObjectMapper,
 ) : FlowtraceCache {
+    override fun has(key: String): Boolean = redisTemplate.hasKey(key)
+
     override fun <T : Any> get(
         key: String,
         type: Class<T>,

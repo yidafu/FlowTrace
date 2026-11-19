@@ -10,6 +10,8 @@ import java.time.Duration
  * 域前缀由使用方定义，保持全局可读、无冲突。
  */
 interface FlowtraceCache {
+    fun has(key: String): Boolean
+
     /**
      * 读取并反序列化为 [type]；键不存在或已过期返回 null。
      * 底层以 JSON 文本存储，值需可被 Jackson 序列化/反序列化。

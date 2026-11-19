@@ -1,5 +1,7 @@
 plugins {
     alias(libs.plugins.kotlin.jvm)
+    // all-open：本模块含 @Component 过滤器与 @Configuration，保持与各服务模块一致的 all-open 配置
+    alias(libs.plugins.kotlin.spring)
 }
 
 // 多模块单体下的通用平台模块：Web / 可观测性统一在此聚合
