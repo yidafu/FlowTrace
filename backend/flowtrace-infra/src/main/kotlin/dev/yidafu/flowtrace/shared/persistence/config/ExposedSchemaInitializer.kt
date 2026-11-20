@@ -12,7 +12,7 @@ import org.springframework.stereotype.Component
 /**
  * 启动期补建缺失的表，替代手写/生成 SQL 脚本。
  *
- * 默认关闭（ddl-auto=none）：app 启动测试无真实 PostgreSQL，开启会令启动期连库失败。
+ * 默认关闭（ddl-auto=none）：flowtrace-app 启动测试无真实 PostgreSQL，开启会令启动期连库失败。
  * 置 flowtrace.postgres.ddl-auto=create 后执行两类 DDL：
  * 1. 非分区表（device / retention_policy / dirty_day）走 `SchemaUtils.create`；
  * 2. 分区表（trace_point / trace_segment / trace_batch / audit_log）走 [PartitionedSchema]——

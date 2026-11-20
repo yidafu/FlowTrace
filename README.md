@@ -2,7 +2,7 @@
 
 轨迹采集与回溯平台。从 App 端可靠采集定位点，弱网/离线不丢数据，批量压缩上报；服务端高吞吐接收、异步清洗处理，支持轨迹查询、回放、里程统计、停留点/轨迹段分析，可为巡检等业务提供轨迹佐证。
 
-> **状态**：设计阶段，仓库尚无代码。技术决策与工程约定见 [AGENTS.md](AGENTS.md)；详细设计（协议/存储/API/SDK/服务端/部署，可参考实现级别）见 [docs/design/](docs/design/README.md)。
+> **状态**：工程骨架已初始化（Spring Boot 多模块后端 + RN SDK 库工程 + proto 协议），业务实现按设计文档推进中。技术决策与工程约定见 [AGENTS.md](AGENTS.md)；详细设计（协议/存储/API/SDK/服务端/部署，可参考实现级别）见 [docs/design/](docs/design/README.md)。
 
 ## 核心链路
 
@@ -19,7 +19,7 @@ API网关（TLS、鉴权、按设备限流）
 flowtrace-upload：校验、幂等、写 Kafka 后快速返回
                     |
                     v
-Kafka: trace-raw（按 userId/deviceId 分区）
+Kafka: trace.batch.v1（按 deviceId 分区）
                     |
         +-----------+-----------+
         |                       |
@@ -103,15 +103,10 @@ DELETE /v1/users/{userId}/traces     # 删除用户轨迹（覆盖全部落盘�
 
 ```
 proto/                          # 轨迹上报协议（Protobuf + Delta 编码）
-backend/
-├── platform/                   # common-core / common-web / common-security / common-observability
-├── libs/                       # trace-model / trace-protocol / trace-messaging / trace-storage
-└── services/
-    ├── flowtrace-upload/       # 轨迹接入
-    ├── flowtrace-processor/    # 轨迹处理（JTS）
-    ├── flowtrace-query/        # 轨迹查询
-    ├── flowtrace-realtime/     # 最新位置（Redis）
-    └── flowtrace-admin/        # 设备/保留策略/审计
+backend/                        # 单体应用：三层模块，flowtrace-domain <- flowtrace-infra <- flowtrace-app
+├── flowtrace-domain/           # 领域层：shared/model（模型/几何）+ shared/protocol（Delta 解码、批校验），不依赖 Spring
+├── flowtrace-infra/            # 基础设施层：shared/web、shared/cache(+impl)、shared/persistence、shared/messaging
+└── flowtrace-app/              # 唯一启动模块：ingest / process（JTS）/ query / realtime / admin + 启动类
 sdk/react-native-flowtrace/     # 标准 RN 库工程：src(core/storage/transport/location) + android/ + ios/
 examples/
 deploy/

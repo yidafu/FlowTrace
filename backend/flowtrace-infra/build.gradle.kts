@@ -15,8 +15,8 @@ dependencies {
     api(platform(libs.spring.boot.dependencies))
     api(platform(libs.exposed.bom))
 
-    // 仓储/协议类型出现在本模块公开签名，向上暴露给 app
-    api(project(":domain"))
+    // 仓储/协议类型出现在本模块公开签名，向上暴露给 flowtrace-app
+    api(project(":flowtrace-domain"))
 
     // Web 通用件：TraceId/请求日志过滤器、GlobalExceptionHandler、ApiError、请求体脱敏
     api("org.springframework.boot:spring-boot-starter-webmvc")
@@ -44,7 +44,7 @@ dependencies {
     api("org.springframework.boot:spring-boot-kafka")
 
     // Redis 实现：starter 用 implementation，Spring Data Redis 类型不进入消费方编译类路径，
-    // app 只依赖本模块暴露的缓存抽象接口
+    // flowtrace-app 只依赖本模块暴露的缓存抽象接口
     implementation("org.springframework.boot:spring-boot-starter-data-redis")
 
     testImplementation("org.springframework.boot:spring-boot-starter-webmvc-test")

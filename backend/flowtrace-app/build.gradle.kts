@@ -10,8 +10,8 @@ plugins {
 // 包边界即业务边界：包不跨层引用，日后若需拆分可按包整体移出。
 dependencies {
     implementation(platform(libs.spring.boot.dependencies))
-    implementation(project(":infra"))
-    implementation(project(":domain"))
+    implementation(project(":flowtrace-infra"))
+    implementation(project(":flowtrace-domain"))
 
     implementation("org.jetbrains.kotlin:kotlin-reflect")
     // DataSourceAutoConfiguration + HikariCP，供 Exposed 接入 application.yaml 的 spring.datasource.*
@@ -29,7 +29,8 @@ dependencies {
     testRuntimeOnly("org.junit.platform:junit-platform-launcher")
 }
 
-// 产物名保持 flowtrace-app-<version>.jar：部署脚本与文档沿用旧名，不因模块目录改名而变动
+// 产物名固定为 flowtrace-app-<version>.jar：部署脚本、文档与镜像名沿用该名，
+// 与模块目录名（flowtrace-app）无关，改名不影响产物
 tasks.withType<org.springframework.boot.gradle.tasks.bundling.BootJar>().configureEach {
     archiveBaseName.set("flowtrace-app")
 }
