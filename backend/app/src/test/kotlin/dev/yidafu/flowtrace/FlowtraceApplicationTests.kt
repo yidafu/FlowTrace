@@ -1,10 +1,10 @@
-package dev.yidafu.flowtrace.app
+package dev.yidafu.flowtrace
 
 import org.junit.jupiter.api.Test
 import org.springframework.boot.test.context.SpringBootTest
 
 @SpringBootTest
-class FlowtraceAppApplicationTests {
+class FlowtraceApplicationTests {
     @Test
     fun contextLoads() {
     }

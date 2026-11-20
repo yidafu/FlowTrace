@@ -44,7 +44,7 @@ flowtrace:
   kafka:
     send-timeout-sec: 5                # upload 同步等待 Kafka 确认的超时，超时回滚幂等 key 并 5xx
   log:
-    # 请求日志（platform/common HttpRequestLoggingFilter）
+    # 请求日志（infra/common/web HttpRequestLoggingFilter）
     request-enabled: true              # 每个请求一行访问日志
     payload-on-error: true             # 4xx/5xx 额外打印入参/出参（坐标已脱敏，07 §5）
     max-payload-chars: 2048            # 单个载荷落日志的最大字符数，超出截断
@@ -56,6 +56,8 @@ flowtrace:
     degrade-threshold-pct: 90
     degrade-windows: 10
     degraded-factor: 2
+    max-points-rt: 100                 # 实时通道单批点数上限（06 §2.3）
+    max-points-bf: 500                 # 补传通道单批点数上限（06 §2.3）
     payload-max-bytes: 262144          # 256KB
     gunzip-max-bytes: 2097152
     ts-window-rt-past-ms: 172800000    # 2d
@@ -82,9 +84,17 @@ flowtrace:
     stay-merge-gap-ms: 120000
     dp-storage-epsilon-m: 5
     points-write-batch: 1000
+    open-seg-max-points: 5000          # 单段点数上限，达到即强制分段（08 §8.5）
+    device-state-cache-size: 2000      # 每 consumer 的设备状态 LRU 容量
+    future-ms: 600000                  # 未来时间容忍（清洗规则）
+    batch-timeout-ms: 60000            # 单批墙钟上限，超过按毒丸投 DLQ（06 §3.7）
+    retry-backoff-ms: 2000             # 可重试异常退避起值（无限重试）
     dlq-max-retries: 3
+    dlq-topic: trace.batch.dlq.v1
     recalc-lock-ttl-sec: 300
     dirty-scan-interval-sec: 60
+    segment-finalize-interval-sec: 300 # OPEN 段兜底收尾扫描间隔（06 §3.4）
+    segment-finalize-batch: 500        # 单次封口上限（框住单事务锁行数）
   realtime:
     consumer-group: realtime-group
     pos-ttl-days: 30
