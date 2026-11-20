@@ -13,6 +13,7 @@ import dev.yidafu.flowtrace.shared.cache.WatermarkStore
 import dev.yidafu.flowtrace.shared.model.DirtyDayReason
 import dev.yidafu.flowtrace.shared.persistence.repository.DirtyDayRepository
 import dev.yidafu.flowtrace.shared.persistence.repository.PointsWriter
+import org.jetbrains.exposed.v1.jdbc.transactions.transaction
 import org.slf4j.LoggerFactory
 import org.springframework.stereotype.Component
 
@@ -167,24 +168,42 @@ class BatchPipeline(
             cleaned.dropped.toCountText(),
         )
 
-        // 4. 幂等写点（ON CONFLICT DO NOTHING，返回尝试行数）
-        //    清洗产物已按批头身份构造，可直接当库行写，不需要再整表 copy 覆盖一遍
-        if (cleaned.isNotEmpty()) {
-            val rows = pointsWriter.batchInsertIgnore(cleaned.points)
-            log.debug(
-                "processor 轨迹点写入完成 batchId={} deviceId={} rows={} kept={}",
-                message.batchId,
-                meta.deviceId,
-                rows,
-                cleaned.points.size,
-            )
-        }
-
-        // 5. 迟到 / 重算锁：点已落库，分段交给离线重算——必须先登记 dirty_day，否则段永久缺失
+        // 4. 重算锁：Redis 读，**放在事务外**——不能在 DB 事务里夹一次 Redis 往返（会把事务拖长）
         val recalcLocked = recalcGuard.isLocked(meta.userId)
-        if (late || recalcLocked) {
-            val days = meta.coveredUtcDays()
-            dirtyDay.enqueue(meta.userId, days, DirtyDayReason.LATE_DATA)
+        val skipSegments = late || recalcLocked
+        val days = if (skipSegments) meta.coveredUtcDays() else emptyList()
+
+        // 5. 点 + 段（或 点 + 补偿登记）在**同一个事务**里提交。
+        //
+        // 为什么合并：写段是「整窗重写」（`replaceTail` = DELETE + INSERT），一批 30 点常触发 2–3 次
+        // flush，每次 flush 各自一个事务；叠加台账 UPDATE 后实测 ≈10 次提交/批
+        // （594 批/s → 3.4k commit/s，PG 侧 `LWLock: WALWrite` 占会话 13.5%，处理侧吞吐被提交次数卡死）。
+        // 仓库层的 `transaction {}` 会加入本事务，不再各自提交，因此每批只剩 1 次 fsync。
+        //
+        // 语义不变：点与段要么一起提交、要么一起回滚，重放由 pointId / segmentId 的确定性派生吸收。
+        val segments =
+            transaction {
+                if (cleaned.isNotEmpty()) {
+                    val rows = pointsWriter.batchInsertIgnore(cleaned.points)
+                    log.debug(
+                        "processor 轨迹点写入完成 batchId={} deviceId={} rows={} kept={}",
+                        message.batchId,
+                        meta.deviceId,
+                        rows,
+                        cleaned.points.size,
+                    )
+                }
+                if (skipSegments) {
+                    // 迟到 / 重算锁：分段交给离线重算，但补偿登记必须先落库，否则段永久缺失
+                    dirtyDay.enqueue(meta.userId, days, DirtyDayReason.LATE_DATA)
+                    0
+                } else {
+                    // 6. 在线分段（每批 flush，尾段 OPEN；切分时闭合并落 FINALIZED）
+                    segmenter.onBatch(meta, cleaned.points, wm, state)
+                }
+            }
+
+        if (skipSegments) {
             if (late) {
                 log.info(
                     "processor 迟到批跳过分段并登记重算 batchId={} deviceId={} days={} batchMinTsMs={} prevMaxSeenTs={} driftMs={}",
@@ -217,10 +236,7 @@ class BatchPipeline(
             )
         }
 
-        // 6. 在线分段（每批 flush，尾段 OPEN；切分时闭合并落 FINALIZED）
-        val segments = segmenter.onBatch(meta, cleaned.points, wm, state)
-
-        // 7. 批状态（异步缓冲，失败只记日志，不影响 ack）
+        // 7. 批状态（异步缓冲，失败只记日志，不影响 ack；刻意留在事务外，不反压主链路）
         batchStatus.markProcessed(batchId)
         log.debug(
             "processor 批状态置 PROCESSED batchId={} deviceId={} segments={}",

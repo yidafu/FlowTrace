@@ -1,6 +1,8 @@
 package dev.yidafu.flowtrace.process.store
 
 import dev.yidafu.flowtrace.process.config.ProcessAsyncConfig
+import dev.yidafu.flowtrace.shared.model.TraceBatchStatus
+import dev.yidafu.flowtrace.shared.persistence.repository.BatchStatusChange
 import dev.yidafu.flowtrace.shared.persistence.repository.TraceBatchRepository
 import jakarta.annotation.PreDestroy
 import kotlinx.coroutines.CancellationException
@@ -35,6 +37,9 @@ import java.util.concurrent.atomic.AtomicInteger
  *   绝不反压消费线程、更不能因此不 ack（与 upload 的批记录写入口径一致）；
  * - **单消费者**：状态更新本身可乱序（不同 batch 互不相关），借它把「按 batchId 扫分区」
  *   这类重查询的并发度钉死在 1，避免拖垮 DB；
+ * - **成批回写**：每次取 1~100 条合成一条 `UPDATE ... WHERE batch_id IN (...)`（见 [drain]）。
+ *   逐条回写时每批状态都要 commit 一次，处理侧到 ~500 批/s 就把队列（2048）撑满、开始丢状态
+ *   （2026-11-20 容量报告 §6）；成批后提交数与 `chunk.size` 成反比，且低负载不会额外等待攒批。
  * - 消费者跑在**专用单线程调度器**上（[ProcessAsyncConfig.STATUS_DISPATCHER]），
  *   同步 JDBC 的阻塞只落在这条线程，不占用 `Dispatchers.IO`。
  */
@@ -83,24 +88,33 @@ class BatchStatusUpdater(
         pending.incrementAndGet()
     }
 
-    /** 消费者主循环：Channel 关闭且排空后 `for-in` 自然结束。 */
+    /**
+     * 消费者主循环：队列关闭且排空后 `receiveCatching` 返回 null，正常退出（缓冲里的存量仍会先被取走）。
+     *
+     * **成批回写**：先阻塞取一条，再尽量非阻塞地把队列里现有的取到 [ProcessAsyncConfig.STATUS_BATCH_SIZE]
+     * 条，合成一次 [TraceBatchRepository.applyStatusBatch]。不额外等待攒够——低负载时退化成
+     * 「来一条写一条」，高负载时自动合并到 100 条一次，两个方向都不牺牲时延。
+     */
     private suspend fun drain() {
-        for (command in queue) {
+        while (true) {
+            // 队列已关闭且排空 → getOrNull 为 null，正常退出
+            val head = queue.receiveCatching().getOrNull() ?: break
+            val chunk = ArrayList<Command>(ProcessAsyncConfig.STATUS_BATCH_SIZE)
+            chunk.add(head)
+            while (chunk.size < ProcessAsyncConfig.STATUS_BATCH_SIZE) {
+                chunk.add(queue.tryReceive().getOrNull() ?: break)
+            }
             try {
-                apply(command)
+                applyChunk(chunk)
             } finally {
-                pending.decrementAndGet()
+                pending.addAndGet(-chunk.size)
             }
         }
     }
 
-    private fun apply(command: Command) {
+    private fun applyChunk(chunk: List<Command>) {
         try {
-            when (command) {
-                is Command.Processed -> repository.markProcessed(command.batchId)
-                is Command.Failed -> repository.markFailed(command.batchId, command.errorCode)
-                is Command.Dlq -> repository.markDlq(command.batchId, command.errorCode)
-            }
+            repository.applyStatusBatch(chunk.map { it.toChange() })
         } catch (ex: CancellationException) {
             // 停机取消：必须原样抛出，否则取消会被当成普通异常吞掉、消费者无法退出
             throw ex
@@ -108,9 +122,9 @@ class BatchStatusUpdater(
             // 更新 0 行不是错误（upload 台账可能异步滞后/被丢），真正的异常只记日志：
             // 这里抛出去没人接，状态更新失败不该影响已经 ack 的批次
             log.error(
-                "批状态更新失败 batchId={} action={} cause={}",
-                command.batchId,
-                command.action,
+                "批状态更新失败 size={} actions={} cause={}",
+                chunk.size,
+                chunk.groupingBy { it.action }.eachCount(),
                 ex.message,
                 ex,
             )
@@ -136,6 +150,14 @@ class BatchStatusUpdater(
 
     /** 队列里还排着的条数（测试与排查用）。 */
     fun pending(): Int = pending.get()
+
+    /** 队列命令 → 台账状态流转（同一 chunk 内 `(status, errorCode)` 相同的会合并成一条 UPDATE）。 */
+    private fun Command.toChange(): BatchStatusChange =
+        when (this) {
+            is Command.Processed -> BatchStatusChange(batchId, TraceBatchStatus.PROCESSED)
+            is Command.Failed -> BatchStatusChange(batchId, TraceBatchStatus.FAILED, errorCode)
+            is Command.Dlq -> BatchStatusChange(batchId, TraceBatchStatus.DLQ, errorCode)
+        }
 
     private sealed interface Command {
         val batchId: UUID

@@ -12,7 +12,10 @@ spring:
     username: ${DB_USER:postgres}
     password: ${DB_PASSWORD:admin123}  # 测试环境明文默认值；生产务必用 Secret / 环境变量覆盖
     hikari:
-      maximum-pool-size: 10            # 原 DB_POOL_MAX（Hikari 默认）
+      # 20 = 消费线程 8 + writer 4 + ingest/查询 8。压测（2026-11-20 容量报告 §6）显示：
+      # 池 10 时 Hikari 排队峰值 66、ingest 抢不到连接导致 p95 50→100ms；提到 20 后队列消失。
+      # 上限受 PG max_connections（默认 100）约束，多实例部署时按「实例数 × 20」预留。
+      maximum-pool-size: 20
   data:
     redis:
       url: ${REDIS_URL:redis://localhost:6379}
@@ -87,7 +90,8 @@ flowtrace:
     interval-max-sec: 300
   processor:
     consumer-group: processor-group    # 与 realtime 分键，避免多模块单体撞名
-    concurrency: 8                     # = trace.batch.v1 实际分区数；大于分区数只会让多余线程空转
+    concurrency: 8                     # 分区数 2026-11-21 已扩到 16，此处仍保 8：16 并发在饱和档未跑出收益（见 docs/design/09-performance.md §3.1）；
+                                       # 约束是 concurrency × 实例数 ≤ 分区数，超出的线程拿不到分区只会空转
     poll-records: 100
     watermark-drift-ms: 600000         # 10min 乱序水位窗口
     clean-accuracy-cm: 10000

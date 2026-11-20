@@ -42,14 +42,10 @@ object TracePointTable : Table("trace_point") {
         index(customIndexName = "trace_point_user_ts_idx", false, userId, ts)
         // 设备对账/诊断
         index(customIndexName = "trace_point_device_ts_idx", false, deviceId, ts)
-        // 会话查询（部分索引省空间）
-        index(
-            customIndexName = "trace_point_session_ts_idx",
-            false,
-            sessionId,
-            ts,
-            filterCondition = { sessionId.isNotNull() },
-        )
+        // 已删除 `trace_point_session_ts_idx`（2026-11-20）：写路径每点要维护它，但**没有读路径**——
+        // 巡检侧的 session 过滤走的是 trace_segment（按 userId + start/end 查段），不按点查 session；
+        // 查询接口里的 sessionId 参数也尚未实现。压测实测：索引写放大占总写量的 25%（4 索引 → 3）。
+        // 若将来真需要「按会话取原始点」，优先在 trace_segment 上建 session 索引，而不是回调点表。
     }
 }
 

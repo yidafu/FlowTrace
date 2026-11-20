@@ -49,6 +49,13 @@ data class TraceBatchCursor(
     val batchId: UUID,
 )
 
+/** 一次台账状态流转；[applyStatusBatch] 会把 `(status, errorCode)` 相同的合成一条 UPDATE。 */
+data class BatchStatusChange(
+    val batchId: UUID,
+    val status: TraceBatchStatus,
+    val errorCode: String? = null,
+)
+
 /**
  * `trace_batch` 读写仓储（03 §4，按天分区）。
  *
@@ -89,46 +96,63 @@ open class TraceBatchRepository {
                 }.insertedCount > 0
         }
 
-    /** 标记处理成功（processor 第 8 步，异步缓冲调用）。@return 影响行数 */
+    /**
+     * 标记处理成功（processor 第 8 步，异步缓冲调用）。@return 影响行数
+     *
+     * 单条入口保留给运维/补数脚本；热路径请用 [applyStatusBatch]，逐条 UPDATE 会把提交次数
+     * 拉高到与批数同阶（实测每处理批 ~10 次提交，2026-11-20 容量报告 §6）。
+     */
     fun markProcessed(
         batchId: UUID,
         at: Instant = Instant.now(),
-    ): Int =
-        transaction {
-            TraceBatchTable.update({ TraceBatchTable.batchId eq batchId }) {
-                it[TraceBatchTable.status] = TraceBatchStatus.PROCESSED.value
-                it[processedAt] = at
-                it[errorCode] = null
-            }
-        }
+    ): Int = applyStatusBatch(listOf(BatchStatusChange(batchId, TraceBatchStatus.PROCESSED)), at)
 
     /** 标记确定性失败（含墓碑丢弃）。@return 影响行数 */
     fun markFailed(
         batchId: UUID,
         errorCode: String,
         at: Instant = Instant.now(),
-    ): Int =
-        transaction {
-            TraceBatchTable.update({ TraceBatchTable.batchId eq batchId }) {
-                it[TraceBatchTable.status] = TraceBatchStatus.FAILED.value
-                it[TraceBatchTable.errorCode] = errorCode
-                it[processedAt] = at
-            }
-        }
+    ): Int = applyStatusBatch(listOf(BatchStatusChange(batchId, TraceBatchStatus.FAILED, errorCode)), at)
 
     /** 标记进入死信（06 §3.7）。@return 影响行数 */
     fun markDlq(
         batchId: UUID,
         errorCode: String,
         at: Instant = Instant.now(),
-    ): Int =
-        transaction {
-            TraceBatchTable.update({ TraceBatchTable.batchId eq batchId }) {
-                it[TraceBatchTable.status] = TraceBatchStatus.DLQ.value
-                it[TraceBatchTable.errorCode] = errorCode
-                it[processedAt] = at
-            }
+    ): Int = applyStatusBatch(listOf(BatchStatusChange(batchId, TraceBatchStatus.DLQ, errorCode)), at)
+
+    /**
+     * **批量**回写台账状态：一次事务、按 `(status, errorCode)` 分组合成若干条
+     * `UPDATE ... WHERE batch_id IN (...)`。
+     *
+     * 为什么按状态分组而不是逐条：`PROCESSED` 占绝对多数，一批 100 条通常只合成 1 条 UPDATE
+     * （失败/死信才多出 1–2 条）。收益有两层——语句数 100 → 1，提交数 100 → 1，
+     * 后者才是瓶颈（每次 commit 都要 WAL 刷盘）。
+     *
+     * 注意 `WHERE batch_id IN (...)` 仍会扫全部子分区（分区键是 `received_at`，这里拿不到），
+     * 只是把 100 次索引探测压进一条语句；影响 0 行不是错误（upload 台账可能滞后或被丢）。
+     *
+     * @return 影响行数合计
+     */
+    open fun applyStatusBatch(
+        changes: List<BatchStatusChange>,
+        at: Instant = Instant.now(),
+    ): Int {
+        if (changes.isEmpty()) return 0
+        return transaction {
+            changes
+                .groupBy { it.status to it.errorCode }
+                .entries
+                .sumOf { (key, group) ->
+                    val (status, code) = key
+                    TraceBatchTable.update({ TraceBatchTable.batchId inList group.map { it.batchId } }) {
+                        it[TraceBatchTable.status] = status.value
+                        it[TraceBatchTable.errorCode] = code
+                        it[processedAt] = at
+                    }
+                }
         }
+    }
 
     /** 按幂等键查批次（对账/运维排查）。 */
     fun findByBatchId(batchId: UUID): TraceBatchRow? =

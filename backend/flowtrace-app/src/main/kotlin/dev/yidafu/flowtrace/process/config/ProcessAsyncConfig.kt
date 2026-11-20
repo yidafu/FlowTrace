@@ -33,6 +33,13 @@ class ProcessAsyncConfig {
         /** 有界队列容量：满即丢弃并告警（旁路台账不能反压消费线程）。 */
         const val QUEUE_CAPACITY = 2048
 
+        /**
+         * 单次回写的批大小：攒够（或队列暂时空了）就合成一条 `UPDATE ... WHERE batch_id IN (...)`。
+         * 100 条 ≈ 2 个消费批的量，够把提交次数从「每批 1 次」压到「每百批 1 次」，
+         * 又不至于让一条语句的 IN 列表过长（PG 绑定参数上限 65535，远未触及）。
+         */
+        const val STATUS_BATCH_SIZE = 100
+
         /** 停机排空上限：正常重启时把队列里已 ack 的状态流转写完。 */
         const val DRAIN_TIMEOUT_MS = 5_000L
 
