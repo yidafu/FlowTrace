@@ -18,5 +18,5 @@
 
 本目录是协议唯一事实源，两端直接指向这里生成，不做文件复制：
 
-- **后端**：`libs/trace-protocol` 经 protobuf-gradle-plugin 生成 Java + Kotlin DSL，随 `./gradlew build` 自动执行；protoc 与运行时版本统一在 `backend/gradle/libs.versions.toml`。
+- **后端**：`backend/domain` 经 protobuf-gradle-plugin 生成 Java + Kotlin DSL，随 `./gradlew build` 自动执行；protoc 与运行时版本统一在 `backend/gradle/libs.versions.toml`。
 - **SDK**：`cd sdk/react-native-flowtrace && yarn proto:generate`（buf + Protobuf ES，输出 `src/transport/generated/trace_pb.ts`，生成代码随源码入库）。

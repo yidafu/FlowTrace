@@ -30,10 +30,13 @@ enum LocationSource {
 // 0x10 FLAG_LOW_BATTERY    低电量模式下采集
 
 // 批头基准值：批内点做增量编码，坐标整数量化（×1e7）
+//
+// 坐标一律 sint64（zigzag，见 02 §2）：西经/南半球是负值，int32 的负 varint 会被符号扩展到
+// 10 字节，zigzag 下 5 字节；同时给 Delta 留出溢出余量（解码后按坐标范围校验兜底）。
 message GeoBase {
-  int64 ts_ms = 1;   // epoch 毫秒
-  int32 lat_q = 2;  // 纬度 ×1e7（= round(度 × 10^7)）
-  int32 lng_q = 3;  // 经度 ×1e7
+  int64 ts_ms = 1;    // epoch 毫秒
+  sint64 lat_q = 2;   // 纬度 ×1e7（= round(度 × 10^7)）
+  sint64 lng_q = 3;   // 经度 ×1e7
 }
 
 message SdkInfo {
@@ -58,10 +61,13 @@ message TraceBatchHeader {
 }
 
 // 批内点：相对前一点的链式增量（cur = prev + delta，prev₀ = header.base）
+//
+// 三个增量字段必须是 sint64（zigzag）：增量有一半概率为负，int32/int64 的负值编码成
+// 10 字节 varint（符号扩展到 64 位），zigzag 下 2~5 字节。实测 200 点批未压缩 8169B → 5736B。
 message TracePointDelta {
   sint64 d_ts = 1;           // ts_ms  差；首点 = 0（proto3 省略）
-  int32 d_lat = 2;          // lat_q  差；首点 = 0
-  int32 d_lng = 3;          // lng_q  差；首点 = 0
+  sint64 d_lat = 2;          // lat_q  差；首点 = 0
+  sint64 d_lng = 3;          // lng_q  差；首点 = 0
   // 与 trace_message.AbsolutePoint 字段布局对齐（accuracy=4、speed=5）
   int32 accuracy_cm = 4;     // 【可选】定位精度 cm（68% 置信）
   float speed_mps = 5;       // 【可选】速度 m/s
