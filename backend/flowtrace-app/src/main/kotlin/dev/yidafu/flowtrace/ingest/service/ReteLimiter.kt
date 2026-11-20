@@ -1,6 +1,7 @@
 package dev.yidafu.flowtrace.ingest.service
 
 import dev.yidafu.flowtrace.ingest.config.UploadProperties
+import dev.yidafu.flowtrace.ingest.metrics.UploadMetrics
 import dev.yidafu.flowtrace.shared.cache.FlowtraceCache
 import dev.yidafu.flowtrace.v1.Channel
 import org.springframework.stereotype.Component
@@ -22,6 +23,7 @@ import java.time.Duration
 class ReteLimiter(
     private val cache: FlowtraceCache,
     private val props: UploadProperties,
+    private val metrics: UploadMetrics,
 ) {
     /**
      * 判定本批是否放行，**同时消耗配额**（不是纯查询，重复调用会重复计数）。
@@ -45,6 +47,8 @@ class ReteLimiter(
             }
         val batchCount = cache.increment(RATE_LIMIT_BATCH_COUNT + deviceId + ":" + channel.name, WINDOW)
         if (batchLimit < batchCount) {
+            // 指标只记「被拒」，不记 deviceId：设备维度的时间序列会无限膨胀（07 §4 标签纪律）
+            metrics.rateLimited(channel.name)
             return false
         }
         // 空批不占点数额度：incrementBy 要求步长为正，先短路
@@ -53,6 +57,7 @@ class ReteLimiter(
         }
         val nextPointCount = cache.incrementBy(RATE_LIMIT_POINT_COUNT + deviceId, pointCount.toLong(), WINDOW)
         if (props.limitPointsPerMin < nextPointCount) {
+            metrics.rateLimited(channel.name)
             return false
         }
         return true

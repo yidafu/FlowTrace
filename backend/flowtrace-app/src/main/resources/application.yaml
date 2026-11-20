@@ -34,6 +34,22 @@ management:
   otlp:
     tracing:
       endpoint: ${OTEL_ENDPOINT:http://localhost:4318/v1/traces}
+  # 指标抓取入口：本地 Prometheus（deploy/prometheus/prometheus.yml）打 /actuator/prometheus。
+  # 不配 exposure 时 actuator 只暴露 health，抓取会一直 404 → target down。
+  # 与业务接口同端口（未设 management.server.port）；生产建议独立内网端口并禁止网关转发 /actuator/**。
+  endpoints:
+    web:
+      exposure:
+        include: health,info,prometheus
+  metrics:
+    tags:
+      application: flowtrace          # 全局标签：多实例/多环境聚合时区分服务
+    distribution:
+      # Timer 默认只输出 count/sum/max，没有分位数；不开 histogram 则 07 §4 的 p95/p99 告警全是空的
+      percentiles-histogram:
+        http.server.requests: true
+      slo:
+        http.server.requests: 50ms,100ms,500ms,1s
 
 flowtrace:
   postgres:

@@ -2,6 +2,7 @@ package dev.yidafu.flowtrace.ingest
 
 import dev.yidafu.flowtrace.ingest.config.UploadProperties
 import dev.yidafu.flowtrace.ingest.dto.UploadBatchResponse
+import dev.yidafu.flowtrace.ingest.metrics.UploadMetrics
 import dev.yidafu.flowtrace.ingest.service.DeviceVersionService
 import dev.yidafu.flowtrace.ingest.service.ReteLimiter
 import dev.yidafu.flowtrace.ingest.service.TraceBatchWriter
@@ -22,6 +23,7 @@ import dev.yidafu.flowtrace.v1.SdkInfo
 import dev.yidafu.flowtrace.v1.TraceBatchHeader
 import dev.yidafu.flowtrace.v1.TraceBatchRequest
 import dev.yidafu.flowtrace.v1.TracePointDelta
+import io.micrometer.core.instrument.simple.SimpleMeterRegistry
 import kotlinx.coroutines.Dispatchers
 import org.mockito.Mockito
 import org.mockito.stubbing.Answer
@@ -50,10 +52,14 @@ class TraceUploadControllerFlowTest {
     private val writer = RecordingWriter()
     private val gate = RecordingGate()
 
+    /** 指标用内存 registry：既有真实实现，又能断言「这个分支到底记了什么」。 */
+    private val registry = SimpleMeterRegistry()
+    private val metrics = UploadMetrics(registry)
+
     private val producer: TraceBatchProducer = Mockito.mock(TraceBatchProducer::class.java)
 
     private fun controller(props: UploadProperties = UploadProperties()) =
-        TraceUploadController(deviceService, producer, limiter, props, writer, gate)
+        TraceUploadController(deviceService, producer, limiter, props, writer, gate, metrics)
 
     /** 幂等闸门替身：记录占用/回滚，`duplicate=true` 时模拟重复批。 */
     private class RecordingGate : IdempotencyGate {
@@ -135,7 +141,7 @@ class TraceUploadControllerFlowTest {
 
         val ex =
             assertFails {
-                TraceUploadController(deviceService, failing, limiter, UploadProperties(), writer, gate)
+                TraceUploadController(deviceService, failing, limiter, UploadProperties(), writer, gate, metrics)
                     .uploadBatch(request(listOf(delta(0))))
             }
 
@@ -358,7 +364,7 @@ class TraceUploadControllerFlowTest {
     }
 
     /** 限流器替身：`allow` 控制放行，`calls` 用于断言「是否消耗额度」。 */
-    private class RecordingLimiter : ReteLimiter(InMemoryCache(), UploadProperties()) {
+    private class RecordingLimiter : ReteLimiter(InMemoryCache(), UploadProperties(), UploadMetrics(SimpleMeterRegistry())) {
         var allow: Boolean = true
         val calls = mutableListOf<Call>()
 

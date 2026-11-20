@@ -1,8 +1,10 @@
 package dev.yidafu.flowtrace.process.recalc
 
 import dev.yidafu.flowtrace.process.config.ProcessorProperties
+import dev.yidafu.flowtrace.process.metrics.ProcessorMetrics
 import dev.yidafu.flowtrace.process.segment.SegmentBuilder
 import dev.yidafu.flowtrace.process.store.RecalcGuard
+import dev.yidafu.flowtrace.shared.model.DirtyDayStatus
 import dev.yidafu.flowtrace.shared.model.SegmentStatus
 import dev.yidafu.flowtrace.shared.model.TracePoint
 import dev.yidafu.flowtrace.shared.model.TraceSegmentDraft
@@ -45,6 +47,7 @@ class DirtyDayRecalculator(
     private val pointRepository: TracePointRepository,
     private val segmentRepository: TraceSegmentRepository,
     private val builder: SegmentBuilder,
+    private val metrics: ProcessorMetrics,
 ) {
     private val log = LoggerFactory.getLogger(javaClass)
 
@@ -81,6 +84,25 @@ class DirtyDayRecalculator(
         }
         if (handled > 0) {
             log.info("processor 迟到重算轮次结束 tasks={}", handled)
+        }
+        refreshGauges()
+    }
+
+    /**
+     * 刷新 dirty_day 积压 Gauge（07 §4：`failed > 0` → P2，`pending` 持续增长 → P3）。
+     *
+     * 挂在扫描周期的尾巴上，不另起 `@Scheduled`：同一份数据、同一个频率，多一个定时任务
+     * 只会让两条曲线日后对不上时多一处要排查的地方。
+     */
+    private fun refreshGauges() {
+        try {
+            metrics.refreshDirtyDay(
+                pending = dirtyDay.countByStatus(DirtyDayStatus.PENDING),
+                failed = dirtyDay.countByStatus(DirtyDayStatus.FAILED),
+            )
+        } catch (ex: Exception) {
+            // 指标是旁路：查不到就沿用上一次值，绝不因为监控采样失败去影响重算调度
+            log.debug("processor dirty_day 监控采样失败，沿用上次值 cause={}", ex.message)
         }
     }
 

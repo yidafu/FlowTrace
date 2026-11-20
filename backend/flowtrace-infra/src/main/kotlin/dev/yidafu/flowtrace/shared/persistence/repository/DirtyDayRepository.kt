@@ -165,6 +165,20 @@ open class DirtyDayRepository {
             }
         }
 
+    /**
+     * 按状态统计任务数（07 §4 的 `ft_dirty_day_pending` / `ft_dirty_day_failed`）。
+     *
+     * 走 `status` 列全表扫描：`dirty_day` 是队列表，常态接近空，量级是「用户数 × 迟到天数」，
+     * 不值得为监控再加一个索引（多一个索引就多一份写放大）。
+     */
+    fun countByStatus(status: DirtyDayStatus): Long =
+        transaction {
+            DirtyDayTable
+                .selectAll()
+                .where { DirtyDayTable.status eq status.value }
+                .count()
+        }
+
     /** 用户当前的全部重算任务（admin 排查「为什么某天数据没更新」用）。 */
     fun listByUser(userId: String): List<DirtyDayRow> =
         transaction {

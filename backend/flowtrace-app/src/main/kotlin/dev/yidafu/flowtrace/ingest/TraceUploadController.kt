@@ -2,6 +2,7 @@ package dev.yidafu.flowtrace.ingest
 
 import dev.yidafu.flowtrace.ingest.config.UploadProperties
 import dev.yidafu.flowtrace.ingest.dto.UploadBatchResponse
+import dev.yidafu.flowtrace.ingest.metrics.UploadMetrics
 import dev.yidafu.flowtrace.ingest.service.DeviceVersionService
 import dev.yidafu.flowtrace.ingest.service.ReteLimiter
 import dev.yidafu.flowtrace.ingest.service.TraceBatchWriter
@@ -28,6 +29,7 @@ import org.springframework.web.bind.annotation.PostMapping
 import org.springframework.web.bind.annotation.RequestBody
 import org.springframework.web.bind.annotation.RequestMapping
 import org.springframework.web.bind.annotation.RestController
+import java.time.Duration
 import java.time.Instant
 import java.util.UUID
 
@@ -53,6 +55,10 @@ import java.util.UUID
  * - INFO「upload 批次接收完成」：正常路径每批一行，带 batchId/deviceId/accepted/costMs/nextUploadIntervalSec；
  * - DEBUG：入口、解码/折叠结果、设备注册、Kafka 写入耗时、批次记录落库；
  * - WARN/ERROR：batchId 非法、设备非 ACTIVE、SDK 版本不支持、字段校验失败、限流、Kafka 写入失败、台账队列满。
+ *
+ * 指标出口全部收敛在 [UploadMetrics]：`ft_upload_requests_total{code}` 按返回分支计数（`error()` /
+ * `validationError()` / `response()` 三个出口各记一次，新增分支不会漏），耗时 `ft_upload_duration_seconds`
+ * 只在 Kafka 确认后的成功批上记一次。
  */
 @RestController
 @RequestMapping("/v1/traces")
@@ -63,6 +69,7 @@ class TraceUploadController(
     private val uploadProperties: UploadProperties,
     private val batchWriter: TraceBatchWriter,
     private val idempotencyGate: IdempotencyGate,
+    private val metrics: UploadMetrics,
 ) {
     private val log = LoggerFactory.getLogger(javaClass)
 
@@ -84,6 +91,8 @@ class TraceUploadController(
         @RequestBody batch: TraceBatchRequest,
     ): ResponseEntity<Any> {
         val receivedTsMs = System.currentTimeMillis()
+        // 单调时钟：耗时要抗 NTP 回拨，不能用 wall clock 相减（receivedTsMs 只用于协议回填与日志）
+        val startedNs = System.nanoTime()
         val header = batch.header
         val did = header.deviceId
 
@@ -188,6 +197,8 @@ class TraceUploadController(
                 decoded.rawCount,
                 limitedIntervalSec,
             )
+            // 请求分布记 RATE_LIMITED；「哪个通道被限」由 ReteLimiter 的 ft_ratelimit_hits_total 承担
+            metrics.request(ApiErrorCode.RATE_LIMITED)
             return ResponseEntity
                 .status(HttpStatus.TOO_MANY_REQUESTS)
                 .header(HttpHeaders.RETRY_AFTER, limitedIntervalSec.toString())
@@ -222,6 +233,8 @@ class TraceUploadController(
                 did,
                 points.size,
             )
+            // 重复批单独计数：它和 5xx 一样会让「上报成功率」失真，但根因是端侧重试而非服务故障
+            metrics.duplicateBatch()
             return ResponseEntity.ok(
                 response(header.batchId, accepted = 0, deduplicated = true, serverTsMs = receivedTsMs),
             )
@@ -249,6 +262,9 @@ class TraceUploadController(
             // D19：先回滚幂等占位再 5xx。留着占位会让 SDK 的重试被当成重复批静默丢弃，
             // 而 Kafka 里其实没有这批数据——「返回 200 但没写 Kafka」是绝对不允许的状态。
             idempotencyGate.release(idemKey)
+            // 指标先记再抛：异常出栈后由 GlobalExceptionHandler 统一回 500，这里补上业务维度
+            metrics.kafkaSendFailure()
+            metrics.request(ApiErrorCode.INTERNAL)
             log.error(
                 "upload 写入 Kafka 失败（回滚幂等占位，本次返回 5xx，端侧按退避重试） batchId={} deviceId={} points={} costMs={} cause={}",
                 header.batchId,
@@ -297,6 +313,9 @@ class TraceUploadController(
             elapsedSinceMs(receivedTsMs),
             nextUploadIntervalSec(),
         )
+        // 07 §4 `ft_upload_duration_seconds`：只在这条「真正写进 Kafka 的成功批」上记一次，
+        // 口径见 UploadMetrics.uploadDuration（快速拒绝不进直方图，否则会拉低 p99）
+        metrics.uploadDuration(Duration.ofNanos(System.nanoTime() - startedNs))
         return ResponseEntity.ok(response(header.batchId, accepted = points.size, serverTsMs = receivedTsMs))
     }
 
@@ -358,6 +377,8 @@ class TraceUploadController(
             failure.idx?.let {
                 mapOf("rejectedPoints" to listOf(mapOf("idx" to it, "reason" to failure.code.name)))
             }
+        // 确定性失败（422/413）也要计数：5xx 占比告警看的是 code 分布，漏掉这类会让分母失真
+        metrics.request(code)
         return ResponseEntity.status(status).body(apiError(code, failure.message, details = details))
     }
 
@@ -366,14 +387,17 @@ class TraceUploadController(
         accepted: Int,
         serverTsMs: Long,
         deduplicated: Boolean = false,
-    ): UploadBatchResponse =
-        UploadBatchResponse(
+    ): UploadBatchResponse {
+        // 所有 200 都从这里出（空批 / 幂等命中 / 正常接收），成功计数只在此处 +1，不会漏也不会双计
+        metrics.requestOk()
+        return UploadBatchResponse(
             batchId = batchId,
             accepted = accepted,
             deduplicated = deduplicated,
             nextUploadIntervalSec = nextUploadIntervalSec(),
             serverTsMs = serverTsMs,
         )
+    }
 
     /**
      * 下发下次上报间隔（04 §2.3）。
@@ -387,11 +411,18 @@ class TraceUploadController(
     private fun isSupportedSdkVersion(version: String): Boolean =
         version == SUPPORTED_SDK_MAJOR_MINOR || version.startsWith("$SUPPORTED_SDK_MAJOR_MINOR.")
 
+    /**
+     * 显式错误出口（4xx/5xx）：**所有走这里的失败都自动计入 `ft_upload_requests_total{code}`**，
+     * 新增分支不必再记得埋点。[validationError] 与限流分支自己构造响应体，各自单独计数。
+     */
     private fun error(
         status: HttpStatus,
         code: ApiErrorCode,
         message: String,
-    ): ResponseEntity<Any> = ResponseEntity.status(status).body(apiError(code, message))
+    ): ResponseEntity<Any> {
+        metrics.request(code)
+        return ResponseEntity.status(status).body(apiError(code, message))
+    }
 
     private companion object {
         const val SUPPORTED_SDK_MAJOR_MINOR = "1.0"

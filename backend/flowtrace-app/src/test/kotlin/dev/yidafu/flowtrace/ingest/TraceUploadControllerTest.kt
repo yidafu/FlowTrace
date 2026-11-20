@@ -1,6 +1,7 @@
 package dev.yidafu.flowtrace.ingest
 
 import dev.yidafu.flowtrace.ingest.config.UploadProperties
+import dev.yidafu.flowtrace.ingest.metrics.UploadMetrics
 import dev.yidafu.flowtrace.ingest.service.DeviceVersionService
 import dev.yidafu.flowtrace.ingest.service.ReteLimiter
 import dev.yidafu.flowtrace.ingest.service.TraceBatchWriter
@@ -14,6 +15,7 @@ import dev.yidafu.flowtrace.v1.SdkInfo
 import dev.yidafu.flowtrace.v1.TraceBatchHeader
 import dev.yidafu.flowtrace.v1.TraceBatchRequest
 import dev.yidafu.flowtrace.v1.TracePointDelta
+import io.micrometer.core.instrument.simple.SimpleMeterRegistry
 import org.junit.jupiter.api.BeforeEach
 import org.mockito.Mockito
 import org.mockito.Mockito.`when`
@@ -26,6 +28,7 @@ import org.springframework.test.web.servlet.setup.MockMvcBuilders
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFailsWith
+import kotlin.test.assertTrue
 
 /**
  * 上报控制器测试（standalone MockMvc，注册与生产一致的 Protobuf + Jackson 消息转换器）。
@@ -53,10 +56,22 @@ class TraceUploadControllerTest {
             if (invocation.method.name == "tryAcquire") true else Mockito.RETURNS_DEFAULTS.answer(invocation)
         }
 
+    /** 内存 registry：断言「哪个分支记了哪个 code」。 */
+    private val registry = SimpleMeterRegistry()
+    private val metrics = UploadMetrics(registry)
+
     private val mockMvc: MockMvc =
         MockMvcBuilders
             .standaloneSetup(
-                TraceUploadController(deviceVersionService, producer, limiter, UploadProperties(), batchWriter, idempotencyGate),
+                TraceUploadController(
+                    deviceVersionService,
+                    producer,
+                    limiter,
+                    UploadProperties(),
+                    batchWriter,
+                    idempotencyGate,
+                    metrics,
+                ),
             )
             // Protobuf 转换器负责请求体绑定，Jackson 转换器负责 UploadBatchResponse / 错误体的 JSON 序列化
             .setMessageConverters(ProtobufJsonFormatHttpMessageConverter(), JacksonJsonHttpMessageConverter())
@@ -248,6 +263,7 @@ class TraceUploadControllerTest {
                         UploadProperties(),
                         batchWriter,
                         idempotencyGate,
+                        metrics,
                     ),
                 ).setMessageConverters(ProtobufJsonFormatHttpMessageConverter(), JacksonJsonHttpMessageConverter())
                 .build()
@@ -263,6 +279,52 @@ class TraceUploadControllerTest {
         // D19：占位必须回滚，否则端侧重试会被误判为重复批而丢数据
         Mockito.verify(idempotencyGate).release(validBatchId)
         Mockito.verifyNoInteractions(batchWriter)
+    }
+
+    @Test
+    fun `请求结果按 code 计数，重复批单独计数`() {
+        // 非法 batchId → 422 PROTOCOL_ERROR（走 error() 出口，自动计数）
+        mockMvc
+            .post("/v1/traces/batch") {
+                contentType = MediaType.parseMediaType("application/x-protobuf")
+                content = request(listOf(delta(0)), batchId = "not-a-uuid").toByteArray()
+            }.andExpect { status { isUnprocessableContent() } }
+
+        // 空批 → 200 OK（走 response() 出口）
+        mockMvc
+            .post("/v1/traces/batch") {
+                contentType = MediaType.parseMediaType("application/x-protobuf")
+                content = request(emptyList()).toByteArray()
+            }.andExpect { status { isOk() } }
+
+        val protocolErrors = registry.find("ft.upload.requests").tag("code", "PROTOCOL_ERROR").counter()
+        val oks = registry.find("ft.upload.requests").tag("code", "OK").counter()
+        // 422 必须计入 code 分布，否则 5xx/4xx 占比告警的分母会失真
+        assertEquals(1.0, protocolErrors?.count() ?: 0.0)
+        // 空批是成功路径，计 OK 而不是被漏掉
+        assertEquals(1.0, oks?.count() ?: 0.0)
+    }
+
+    @Test
+    fun `成功受理的批记录上传耗时，快速拒绝不进直方图`() {
+        // 正常批 → 200 且 Kafka 已确认：记一条耗时（3 个点，与 setUp 里 limiter 的打桩一致）
+        mockMvc
+            .post("/v1/traces/batch") {
+                contentType = MediaType.parseMediaType("application/x-protobuf")
+                content = request(listOf(delta(0), delta(100), delta(200))).toByteArray()
+            }.andExpect { status { isOk() } }
+
+        // 非法 batchId → 422：毫秒级快速拒绝，不许进同一个直方图（否则 p99 被拉低）
+        mockMvc
+            .post("/v1/traces/batch") {
+                contentType = MediaType.parseMediaType("application/x-protobuf")
+                content = request(listOf(delta(0)), batchId = "not-a-uuid").toByteArray()
+            }.andExpect { status { isUnprocessableContent() } }
+
+        val timer = registry.find("ft.upload.duration").timer()
+        assertEquals(1L, timer?.count() ?: 0L)
+        // 直方图桶必须导出（publishPercentileHistogram），否则 Prometheus 端 histogram_quantile 算不出 p99
+        assertTrue((timer?.takeSnapshot()?.histogramCounts()?.size ?: 0) > 0)
     }
 
     private fun delta(dTs: Long): TracePointDelta =

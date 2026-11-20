@@ -1,8 +1,10 @@
 package dev.yidafu.flowtrace.ingest.service
 
 import dev.yidafu.flowtrace.ingest.config.UploadProperties
+import dev.yidafu.flowtrace.ingest.metrics.UploadMetrics
 import dev.yidafu.flowtrace.shared.cache.FlowtraceCache
 import dev.yidafu.flowtrace.v1.Channel
+import io.micrometer.core.instrument.simple.SimpleMeterRegistry
 import java.time.Duration
 import kotlin.test.Test
 import kotlin.test.assertEquals
@@ -20,7 +22,8 @@ import kotlin.test.assertTrue
 class ReteLimiterTest {
     private val props = UploadProperties()
     private val cache = InMemoryCache()
-    private val limiter = ReteLimiter(cache, props)
+    private val registry = SimpleMeterRegistry()
+    private val limiter = ReteLimiter(cache, props, UploadMetrics(registry))
 
     @Test
     fun `实时通道允许 12 批，第 13 批拒绝`() {
@@ -36,6 +39,20 @@ class ReteLimiterTest {
             assertTrue(limiter.check("dev-bf", Channel.CHANNEL_BACKFILL, 1), "第 $it 批应放行")
         }
         assertFalse(limiter.check("dev-bf", Channel.CHANNEL_BACKFILL, 1), "第 7 批应被限流")
+    }
+
+    @Test
+    fun `限流命中只记被拒的通道`() {
+        repeat(props.limitBatchPerMinRt) {
+            limiter.check("dev-m", Channel.CHANNEL_REALTIME, 1)
+        }
+        assertFalse(limiter.check("dev-m", Channel.CHANNEL_REALTIME, 1))
+
+        // 放行不计数，只记被拒；标签是通道而非设备（设备维度会让时间序列膨胀）
+        val realtimeHits = registry.find("ft.ratelimit.hits").tag("channel", "CHANNEL_REALTIME").counter()
+        val backfillHits = registry.find("ft.ratelimit.hits").tag("channel", "CHANNEL_BACKFILL").counter()
+        assertEquals(1.0, realtimeHits?.count() ?: 0.0)
+        assertEquals(0.0, backfillHits?.count() ?: 0.0, "另一个通道不该被连带计数")
     }
 
     @Test

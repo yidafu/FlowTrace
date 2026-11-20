@@ -4,6 +4,7 @@ import com.google.protobuf.InvalidProtocolBufferException
 import dev.yidafu.flowtrace.internal.v1.TraceMessage
 import dev.yidafu.flowtrace.process.config.ProcessorProperties
 import dev.yidafu.flowtrace.process.dlq.DlqSink
+import dev.yidafu.flowtrace.process.metrics.ProcessorMetrics
 import dev.yidafu.flowtrace.process.pipeline.BatchPipeline
 import dev.yidafu.flowtrace.process.store.BatchStatusSink
 import org.apache.kafka.clients.consumer.ConsumerRecord
@@ -35,6 +36,7 @@ class TraceBatchListener(
     private val dlqPublisher: DlqSink,
     private val batchStatus: BatchStatusSink,
     private val props: ProcessorProperties,
+    private val metrics: ProcessorMetrics,
 ) {
     private val log = LoggerFactory.getLogger(javaClass)
 
@@ -150,6 +152,11 @@ class TraceBatchListener(
                 throw ex
             }
         val costMs = (System.nanoTime() - startNs) / NANOS_PER_MILLI
+
+        // 指标断点：按 result 拆「入库」与「按原因丢弃」。放在日志之前——日志级别关掉时指标也必须存在。
+        // 每批只在这里记一次，管道本身保持纯逻辑（不依赖 Micrometer），BatchResult 就是它的计数契约。
+        metrics.pointsInserted(result.kept)
+        metrics.pointsDropped(result.dropped)
 
         // 断点③：每批一行 info（08 §12 字段口径）；>5s 升级为 WARN（07 §5 慢批）
         val summary =

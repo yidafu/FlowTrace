@@ -3,7 +3,9 @@ package dev.yidafu.flowtrace.shared.messaging
 import org.apache.kafka.clients.producer.ProducerConfig
 import org.apache.kafka.common.serialization.ByteArraySerializer
 import org.apache.kafka.common.serialization.StringSerializer
+import org.springframework.beans.factory.ObjectProvider
 import org.springframework.beans.factory.annotation.Value
+import org.springframework.boot.kafka.autoconfigure.DefaultKafkaProducerFactoryCustomizer
 import org.springframework.context.annotation.Bean
 import org.springframework.context.annotation.Configuration
 import org.springframework.kafka.core.DefaultKafkaProducerFactory
@@ -22,6 +24,10 @@ class TraceKafkaProducerConfig {
     @Bean
     fun traceProducerFactory(
         @Value("\${spring.kafka.bootstrap-servers:localhost:9092}") bootstrapServers: String,
+        // Boot 的 KafkaMetricsAutoConfiguration 只把 kafka_producer_* 指标（发送速率、重试、错误数）
+        // 通过 customizer 挂到它自己建的工厂上；本类是手工工厂，要显式接一遍。
+        // 未启 actuator（没有 MeterRegistry）时 provider 为空，不影响启动。
+        factoryCustomizers: ObjectProvider<DefaultKafkaProducerFactoryCustomizer>,
     ): ProducerFactory<String, ByteArray> {
         val props =
             mapOf<String, Any>(
@@ -33,7 +39,9 @@ class TraceKafkaProducerConfig {
                 ProducerConfig.COMPRESSION_TYPE_CONFIG to "lz4",
                 ProducerConfig.LINGER_MS_CONFIG to 5,
             )
-        return DefaultKafkaProducerFactory(props)
+        val factory = DefaultKafkaProducerFactory<String, ByteArray>(props)
+        factoryCustomizers.orderedStream().forEach { it.customize(factory) }
+        return factory
     }
 
     @Bean

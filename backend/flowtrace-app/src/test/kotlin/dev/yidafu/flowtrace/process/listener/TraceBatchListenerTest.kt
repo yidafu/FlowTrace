@@ -3,8 +3,10 @@ package dev.yidafu.flowtrace.process.listener
 import dev.yidafu.flowtrace.internal.v1.TraceMessage
 import dev.yidafu.flowtrace.process.config.ProcessorProperties
 import dev.yidafu.flowtrace.process.dlq.DlqSink
+import dev.yidafu.flowtrace.process.metrics.ProcessorMetrics
 import dev.yidafu.flowtrace.process.pipeline.PipelineFixture
 import dev.yidafu.flowtrace.process.store.BatchStatusSink
+import io.micrometer.core.instrument.simple.SimpleMeterRegistry
 import org.apache.kafka.clients.consumer.ConsumerRecord
 import org.springframework.kafka.support.Acknowledgment
 import java.util.UUID
@@ -175,7 +177,8 @@ class TraceBatchListenerTest {
         fixture: PipelineFixture,
         dlq: RecordingDlq = RecordingDlq(),
         status: RecordingStatus = RecordingStatus(),
-    ) = TraceBatchListener(fixture.pipeline, dlq, status, ProcessorProperties())
+        registry: SimpleMeterRegistry = SimpleMeterRegistry(),
+    ) = TraceBatchListener(fixture.pipeline, dlq, status, ProcessorProperties(), ProcessorMetrics(registry))
 
     private fun record(value: ByteArray?): ConsumerRecord<String, ByteArray> {
         @Suppress("UNCHECKED_CAST")

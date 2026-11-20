@@ -1,5 +1,6 @@
 package dev.yidafu.flowtrace.process.dlq
 
+import dev.yidafu.flowtrace.process.metrics.ProcessorMetrics
 import org.apache.kafka.clients.producer.ProducerRecord
 import org.slf4j.LoggerFactory
 import org.springframework.beans.factory.annotation.Value
@@ -26,6 +27,7 @@ class DlqPublisher(
     private val kafkaTemplate: KafkaTemplate<String, ByteArray>,
     @Value($$"${flowtrace.processor.dlq-topic:trace.batch.dlq.v1}") private val topic: String,
     @Value($$"${flowtrace.kafka.send-timeout-sec:5}") private val sendTimeoutSec: Long,
+    private val metrics: ProcessorMetrics,
 ) : DlqSink {
     private val log = LoggerFactory.getLogger(javaClass)
 
@@ -54,6 +56,10 @@ class DlqPublisher(
         errorMessage?.let { record.headers().add(HEADER_ERROR_MSG, it.take(MAX_MSG_CHARS).toByteArray(Charsets.UTF_8)) }
         batchId?.let { record.headers().add(HEADER_BATCH_ID, it.toByteArray(Charsets.UTF_8)) }
         channel?.let { record.headers().add(HEADER_CHANNEL, it.toString().toByteArray(Charsets.UTF_8)) }
+        // 死信一产生就计数，不等投递结果：告警口径是「出现了确定性失败」，
+        // 投递本身失败只会更严重，漏计会掩盖问题
+        metrics.dlqProduced(errorCode)
+
         try {
             kafkaTemplate.send(record).get(sendTimeoutSec, TimeUnit.SECONDS)
             log.warn(

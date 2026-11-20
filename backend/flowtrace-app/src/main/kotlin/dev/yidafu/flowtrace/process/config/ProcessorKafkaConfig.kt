@@ -6,6 +6,8 @@ import org.apache.kafka.clients.consumer.ConsumerConfig.GROUP_ID_CONFIG
 import org.apache.kafka.clients.consumer.ConsumerConfig.VALUE_DESERIALIZER_CLASS_CONFIG
 import org.apache.kafka.common.serialization.ByteArrayDeserializer
 import org.apache.kafka.common.serialization.StringDeserializer
+import org.springframework.beans.factory.ObjectProvider
+import org.springframework.boot.kafka.autoconfigure.DefaultKafkaConsumerFactoryCustomizer
 import org.springframework.context.annotation.Bean
 import org.springframework.context.annotation.Configuration
 import org.springframework.kafka.config.ConcurrentKafkaListenerContainerFactory
@@ -41,27 +43,37 @@ class ProcessorKafkaConfig(
      * 的确定性派生吸收）。
      */
     @Bean
-    fun traceProcessorConsumerFactory(): ConsumerFactory<String, ByteArray> =
-        DefaultKafkaConsumerFactory(
-            mapOf(
-                BOOTSTRAP_SERVERS_CONFIG to props.bootstrapServers,
-                GROUP_ID_CONFIG to props.consumerGroup,
-                ConsumerConfig.KEY_DESERIALIZER_CLASS_CONFIG to StringDeserializer::class.java,
-                VALUE_DESERIALIZER_CLASS_CONFIG to ByteArrayDeserializer::class.java,
-                ConsumerConfig.ENABLE_AUTO_COMMIT_CONFIG to false,
-                ConsumerConfig.AUTO_OFFSET_RESET_CONFIG to "earliest",
-                ConsumerConfig.MAX_POLL_RECORDS_CONFIG to props.pollRecords,
-                // 5min：单批墙钟上限只有 batchTimeoutMs（60s），留足「写库 + 分段 + 退避重试」余量，
-                // 又能在消费线程卡死时靠 rebalance 把分区交出去
-                // 必须给 Int：Kafka ConfigDef 里该键是 32 位整型，传 Long 会在 consumer 创建时
-                // 抛 ConfigException（Expected value to be a 32-bit integer）
-                ConsumerConfig.MAX_POLL_INTERVAL_MS_CONFIG to 300_000,
-                // 单次 fetch 上限 1MiB（默认 50MiB）：端侧单批 ≤500 点，展开成内部消息也就几十 KB。
-                // 与 max.poll.records 一起把「一次 poll 的工作量」框住——积压时不会一次拉进几十 MB
-                // 才被 max.poll.records 截断，单批处理时长因而更可控
-                ConsumerConfig.FETCH_MAX_BYTES_CONFIG to (1 shl 20),
-            ),
-        )
+    fun traceProcessorConsumerFactory(
+        // Kafka 客户端指标（kafka_consumer_*，含 records-lag-max）由 Boot 的
+        // KafkaMetricsAutoConfiguration 以 customizer 形式提供，但它只 apply 到自己建的工厂上。
+        // 本类手工建工厂（见类注释），必须显式接一遍，否则 lag 面板永远是空的。
+        // 容器里没有 MeterRegistry（未启 actuator）时该 provider 为空，不影响启动。
+        factoryCustomizers: ObjectProvider<DefaultKafkaConsumerFactoryCustomizer>,
+    ): ConsumerFactory<String, ByteArray> {
+        val factory =
+            DefaultKafkaConsumerFactory<String, ByteArray>(
+                mapOf(
+                    BOOTSTRAP_SERVERS_CONFIG to props.bootstrapServers,
+                    GROUP_ID_CONFIG to props.consumerGroup,
+                    ConsumerConfig.KEY_DESERIALIZER_CLASS_CONFIG to StringDeserializer::class.java,
+                    VALUE_DESERIALIZER_CLASS_CONFIG to ByteArrayDeserializer::class.java,
+                    ConsumerConfig.ENABLE_AUTO_COMMIT_CONFIG to false,
+                    ConsumerConfig.AUTO_OFFSET_RESET_CONFIG to "earliest",
+                    ConsumerConfig.MAX_POLL_RECORDS_CONFIG to props.pollRecords,
+                    // 5min：单批墙钟上限只有 batchTimeoutMs（60s），留足「写库 + 分段 + 退避重试」余量，
+                    // 又能在消费线程卡死时靠 rebalance 把分区交出去
+                    // 必须给 Int：Kafka ConfigDef 里该键是 32 位整型，传 Long 会在 consumer 创建时
+                    // 抛 ConfigException（Expected value to be a 32-bit integer）
+                    ConsumerConfig.MAX_POLL_INTERVAL_MS_CONFIG to 300_000,
+                    // 单次 fetch 上限 1MiB（默认 50MiB）：端侧单批 ≤500 点，展开成内部消息也就几十 KB。
+                    // 与 max.poll.records 一起把「一次 poll 的工作量」框住——积压时不会一次拉进几十 MB
+                    // 才被 max.poll.records 截断，单批处理时长因而更可控
+                    ConsumerConfig.FETCH_MAX_BYTES_CONFIG to (1 shl 20),
+                ),
+            )
+        factoryCustomizers.orderedStream().forEach { it.customize(factory) }
+        return factory
+    }
 
     /**
      * 监听容器工厂：并发数 = 分区数（[ProcessorProperties.concurrency]），ack 手动。
