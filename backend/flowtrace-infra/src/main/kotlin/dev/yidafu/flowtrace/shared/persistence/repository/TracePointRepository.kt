@@ -62,25 +62,26 @@ open class TracePointRepository {
                         "task_id, lat_q, lng_q, accuracy_cm, speed_mps, bearing_deg, altitude_cm, source, flags) " +
                         "VALUES $rows ON CONFLICT (ts, point_id) DO NOTHING"
 
-                val args = buildList {
-                    for (p in chunk) {
-                        add(TracePointTable.ts.columnType to Instant.ofEpochMilli(p.tsMs))
-                        add(TracePointTable.pointId.columnType to p.pointId)
-                        add(TracePointTable.userId.columnType to p.userId)
-                        add(TracePointTable.deviceId.columnType to p.deviceId)
-                        add(TracePointTable.batchId.columnType to p.batchId)
-                        add(TracePointTable.sessionId.columnType to p.sessionId)
-                        add(TracePointTable.taskId.columnType to p.taskId)
-                        add(TracePointTable.latQ.columnType to p.latQ)
-                        add(TracePointTable.lngQ.columnType to p.lngQ)
-                        add(TracePointTable.accuracyCm.columnType to p.accuracyCm)
-                        add(TracePointTable.speedMps.columnType to p.speedMps)
-                        add(TracePointTable.bearingDeg.columnType to p.bearingDeg)
-                        add(TracePointTable.altitudeCm.columnType to p.altitudeCm)
-                        add(TracePointTable.locationSource.columnType to p.source?.value?.toShort())
-                        add(TracePointTable.flags.columnType to p.flags)
+                val args =
+                    buildList {
+                        for (p in chunk) {
+                            add(TracePointTable.ts.columnType to Instant.ofEpochMilli(p.tsMs))
+                            add(TracePointTable.pointId.columnType to p.pointId)
+                            add(TracePointTable.userId.columnType to p.userId)
+                            add(TracePointTable.deviceId.columnType to p.deviceId)
+                            add(TracePointTable.batchId.columnType to p.batchId)
+                            add(TracePointTable.sessionId.columnType to p.sessionId)
+                            add(TracePointTable.taskId.columnType to p.taskId)
+                            add(TracePointTable.latQ.columnType to p.latQ)
+                            add(TracePointTable.lngQ.columnType to p.lngQ)
+                            add(TracePointTable.accuracyCm.columnType to p.accuracyCm)
+                            add(TracePointTable.speedMps.columnType to p.speedMps)
+                            add(TracePointTable.bearingDeg.columnType to p.bearingDeg)
+                            add(TracePointTable.altitudeCm.columnType to p.altitudeCm)
+                            add(TracePointTable.locationSource.columnType to p.source?.value?.toShort())
+                            add(TracePointTable.flags.columnType to p.flags)
+                        }
                     }
-                }
                 exec(sql, args)
                 chunk.size
             }
