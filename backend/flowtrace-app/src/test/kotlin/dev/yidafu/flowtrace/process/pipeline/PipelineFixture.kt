@@ -54,6 +54,9 @@ internal class PipelineFixture(
     /** `finalizeOpenBefore` 收到的 beforeTsMs（截断恢复路径）。 */
     val finalizedBefore = mutableListOf<Long>()
 
+    /** `finalizeOpenRange` 收到的 (fromTsMsInclusive, toTsMsExclusive)：闭合 flush 的前缀翻状态。 */
+    val finalizedRanges = mutableListOf<Pair<Long, Long>>()
+
     /** 被置为 PROCESSED 的 batchId。 */
     val processedBatchIds = mutableListOf<UUID>()
 
@@ -130,6 +133,15 @@ internal class PipelineFixture(
                 beforeTsMs: Long,
             ): Int {
                 finalizedBefore += beforeTsMs
+                return 0
+            }
+
+            override fun finalizeOpenRange(
+                scope: SegmentScope,
+                fromTsMsInclusive: Long,
+                toTsMsExclusive: Long,
+            ): Int {
+                finalizedRanges += fromTsMsInclusive to toTsMsExclusive
                 return 0
             }
         }

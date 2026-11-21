@@ -168,22 +168,23 @@ class OnlineSegmenter(
     }
 
     /**
-     * 把当前 OPEN 窗口落库（`replaceTail`）：先清掉该窗口派生过的旧段，再写入本次构建的段草稿，
-     * 因此同一个窗口被反复 flush 不会产生重复段。
+     * 把当前 OPEN 窗口落库（[TraceSegmentRepository.replaceTail] / `finalizeOpenRange`）：
+     * 先清掉该窗口派生过的旧段，再写入本次构建的段草稿，因此同一个窗口被反复 flush 不会产生重复段。
      *
      * 两处增量（窗口点上限 5000，整窗 O(n) 是长驻设备的真实负担）：
      * - **算**：[OpenWindow.drafts] 作为 `reusable` 传给 [SegmentBuilder.build]，区间没变的段直接复用，
      *   只重算被新点拉长的尾巴区间；
-     * - **写**：只有在**状态要翻**（`close = true` 或水位已落后 → FINALIZED）时才从窗口起点整窗重写——
-     *   同一次 `replaceTail` 的 status 作用于它写入的每一行，漏写的前缀会永远停在 OPEN；
-     *   普通的 OPEN 续写从**第一个重算过的段**开始写，前缀行原样留在库里。
+     * - **写**：只从**第一个重算过的段**开始删写，前缀段内容没变、库里已是它们。状态要翻 FINALIZED
+     *   （`close = true` 或水位已落后）时，前缀也只需翻状态（`finalizeOpenRange`）——不再整窗重写：
+     *   2026-11-21 实测整窗 DELETE+INSERT 占单批 40%，且其中大部分行与库中逐字节相同
+     *   （docs/design/09-performance.md §4）。
      *
      * @param close true = 闭合（段落 FINALIZED 并清空窗口，切分/点数到顶时用）；
      *   false = 续写（段落 OPEN 保留窗口，批末与 LRU 淘汰时用）。**淘汰不是闭合语义**，
      *   传 true 会让这段轨迹在库里永久封口、下一批只能另起一段
      * @param watermark 非空且窗口末点已落后水位超过乱序窗口时，即使 `close = false` 也落 FINALIZED——
      *   长时间没有新批的设备，其窗口靠这个条件最终封口，不必等下一批
-     * @return 本次实际写入的段数；无窗口、无 userId（状态未带上身份）或整窗复用时为 0
+     * @return 本次实际写入/翻状态的段数；无窗口、无 userId（状态未带上身份）或整窗复用且无需封口时为 0
      */
     fun flush(
         state: DeviceState,
@@ -222,31 +223,45 @@ class OnlineSegmenter(
 
         val finalized = close || (watermark != null && open.last.tsMs < watermark - props.watermarkDriftMs)
 
-        // 写库范围：**只有状态要翻**（闭合 / 水位已落后）时才必须从窗口起点整窗重写，
-        // 因为同一次 replaceTail 的 status 作用于它写入的每一行，漏写的前缀会永远停在 OPEN。
-        // 普通的 OPEN 续写只需从**第一个重算过的段**开始：前面的段内容没变，库里已经是它们，
-        // 删了再写一遍纯属浪费（一次 flush 可能涉及几十个段、每个都带 WKT）。
-        val fromTsMs =
-            if (finalized) {
-                open.startTsMs
-            } else {
-                drafts.firstOrNull { open.drafts[it.startTsMs] !== it }?.startTsMs ?: return 0
-            }
-        val toWrite = if (fromTsMs == open.startTsMs) drafts else drafts.filter { it.startTsMs >= fromTsMs }
+        // 写库范围：从**第一个重算过的段**开始（`firstChangedTsMs`），前缀段内容没变、库里已是它们——
+        // OPEN 续写直接跳过前缀；状态要翻 FINALIZED 时前缀也只翻状态（finalizeOpenRange），
+        // 不再整窗 DELETE+INSERT。全复用且无需封口时（重放批、弱网重复上报）不产生任何写。
+        val firstChangedTsMs = drafts.firstOrNull { open.drafts[it.startTsMs] !== it }?.startTsMs
 
-        writer.replaceTail(scope, fromTsMs, drafts = toWrite, status = if (finalized) SegmentStatus.FINALIZED else SegmentStatus.OPEN)
+        val written =
+            if (finalized) {
+                if (firstChangedTsMs == null) {
+                    // 全部段复用（典型：水位封口、本批无新点）：内容不变，把窗口内的 OPEN 段翻成 FINALIZED 即可
+                    writer.finalizeOpenRange(scope, open.startTsMs, open.last.tsMs + 1)
+                    drafts.size
+                } else {
+                    if (firstChangedTsMs > open.startTsMs) {
+                        // 前缀（窗口起点 → 第一个重算段之前）只翻状态，end_ts 原样保留（内容没变）
+                        writer.finalizeOpenRange(scope, open.startTsMs, firstChangedTsMs)
+                    }
+                    val toWrite = drafts.filter { it.startTsMs >= firstChangedTsMs }
+                    writer.replaceTail(scope, firstChangedTsMs, drafts = toWrite, status = SegmentStatus.FINALIZED)
+                    toWrite.size
+                }
+            } else {
+                val fromTsMs = firstChangedTsMs ?: return 0
+                val toWrite = if (fromTsMs == open.startTsMs) drafts else drafts.filter { it.startTsMs >= fromTsMs }
+                writer.replaceTail(scope, fromTsMs, drafts = toWrite, status = SegmentStatus.OPEN)
+                toWrite.size
+            }
+
         // 本轮草稿表留作下一轮的复用基线
         open.drafts = drafts.associateBy { it.startTsMs }
         // 记下尾段当前状态：内容没变时，批末不必为了「封口」再重写一次（见 onBatch 的 flush 门控）
         state.tailFinalized = finalized
         log.debug(
-            "processor 分段写入 deviceId={} userId={} windowStartTsMs={} windowPoints={} fromTsMs={} segments={}/{} status={} close={}",
+            "processor 分段写入 deviceId={} userId={} windowStartTsMs={} windowPoints={} firstChangedTsMs={} segments={}/{} status={} close={}",
             state.deviceId,
             userId,
             open.startTsMs,
             open.points.size,
-            fromTsMs,
-            toWrite.size,
+            firstChangedTsMs,
+            written,
             drafts.size,
             if (finalized) SegmentStatus.FINALIZED else SegmentStatus.OPEN,
             close,
@@ -255,6 +270,6 @@ class OnlineSegmenter(
             state.open = null
             state.tailFinalized = false
         }
-        return toWrite.size
+        return written
     }
 }

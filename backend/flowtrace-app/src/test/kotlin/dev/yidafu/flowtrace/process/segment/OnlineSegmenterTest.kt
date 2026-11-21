@@ -32,6 +32,7 @@ class OnlineSegmenterTest {
     private val props = ProcessorProperties()
     private val writes = mutableListOf<Write>()
     private val finalizedBefore = mutableListOf<Long>()
+    private val finalizedRanges = mutableListOf<Pair<Long, Long>>()
 
     private val repository =
         object : TraceSegmentRepository() {
@@ -49,6 +50,15 @@ class OnlineSegmenterTest {
                 beforeTsMs: Long,
             ): Int {
                 finalizedBefore += beforeTsMs
+                return 0
+            }
+
+            override fun finalizeOpenRange(
+                scope: SegmentScope,
+                fromTsMsInclusive: Long,
+                toTsMsExclusive: Long,
+            ): Int {
+                finalizedRanges += fromTsMsInclusive to toTsMsExclusive
                 return 0
             }
         }
@@ -180,6 +190,52 @@ class OnlineSegmenterTest {
         // 水位没再前进、也没有新点：尾段已经是 FINALIZED，再写一次只会覆盖出同一结果
         assertEquals(0, segmenter.onBatch(meta(points), points, watermark = watermark, state = state))
         assertTrue(writes.isEmpty())
+    }
+
+    @Test
+    fun `闭合 flush 只重写变化尾巴 前缀只翻状态`() {
+        val points = stayWindowPoints()
+        val state = store.getOrLoad(DEVICE_ID)
+        segmenter.onBatch(meta(points), points, watermark = null, state = state)
+        writes.clear()
+
+        // 尾部追加两个 MOVE 点并以水位封口（finalized=true）：前三段（0/1002/3002 起点）区间没变，
+        // 只有 603_000 起的末段被延长——前缀应只翻状态，DELETE+INSERT 只落在变化的尾巴上
+        val watermark = 606_000L + props.watermarkDriftMs + 1
+        val extended =
+            points +
+                point(605_000, lngQ = lngOf(120.0), speedMps = 2f) +
+                point(606_000, lngQ = lngOf(130.0), speedMps = 2f)
+        segmenter.onBatch(meta(extended), extended, watermark = watermark, state = state)
+
+        val write = writes.single()
+        assertEquals(603_000L, write.fromTsMs, "闭合不再整窗重写：从第一个重算过的段起删写")
+        assertEquals(SegmentStatus.FINALIZED, write.status)
+        assertEquals(1, write.drafts.size)
+        assertEquals(
+            listOf(0L to 603_000L),
+            finalizedRanges,
+            "前缀三段只翻状态：范围 = [窗口起点, 第一个重算段)，end_ts 原样保留",
+        )
+    }
+
+    @Test
+    fun `闭合且内容全复用时只翻状态 不删不写`() {
+        val points = listOf(point(0), point(1_000))
+        val watermark = 1_000L + props.watermarkDriftMs + 1
+        val state = store.getOrLoad(DEVICE_ID)
+        segmenter.onBatch(meta(points), points, watermark = null, state = state)
+        writes.clear()
+        finalizedRanges.clear()
+
+        // 重放同批（全部乱序跳过）+ 水位已落后：尾段需要封口，但窗口内容与库里逐字节相同——
+        // 旧实现为此付一次整窗 DELETE+INSERT，现在只该翻状态
+        val written = segmenter.onBatch(meta(points), points, watermark = watermark, state = state)
+
+        assertEquals(1, written, "返回值口径不变：本次涉及的段数")
+        assertTrue(writes.isEmpty(), "内容全复用时不应有 replaceTail")
+        assertEquals(listOf(0L to 1_001L), finalizedRanges, "翻状态范围 = [窗口起点, 窗口末点 ts + 1)")
+        assertNotNull(store.getOrLoad(DEVICE_ID).open, "close=false 时内存窗口保留，等下一批续写")
     }
 
     @Test

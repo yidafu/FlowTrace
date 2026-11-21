@@ -321,6 +321,41 @@ open class TraceSegmentRepository {
         }
 
     /**
+     * 把 `(user_id, device_id, session_id)` 范围内 `[fromTsMsInclusive, toTsMsExclusive)` 的 OPEN 段
+     * 收敛为 FINALIZED，**只翻状态、不改内容**（分段增量化：闭合 flush 的前缀段——区间没变、
+     * 库里已是它们，整窗删了重写纯属浪费）。
+     *
+     * 与 [finalizeOpenBefore] 的区别：那是要**切割**窗口（缓存截断恢复），需要把 `end_ts` 收到
+     * `beforeTsMs - 1`；这里前缀段的几何与区间都不变，`end_ts` 必须原样保留。
+     *
+     * `status = OPEN` 条件让本方法幂等，也与迟到重算竞态安全：重算已把这些行写成 FINALIZED 时
+     * UPDATE 落空（0 行），不会覆盖重算结果。
+     *
+     * @return 被翻状态的行数
+     */
+    fun finalizeOpenRange(
+        scope: SegmentScope,
+        fromTsMsInclusive: Long,
+        toTsMsExclusive: Long,
+    ): Int =
+        transaction {
+            val sessionCondition: Op<Boolean> = TraceSegmentTable.sessionId eq scope.sessionId
+            TraceSegmentTable.update(
+                where = {
+                    (TraceSegmentTable.userId eq scope.userId) and
+                        (TraceSegmentTable.deviceId eq scope.deviceId) and
+                        sessionCondition and
+                        (TraceSegmentTable.status eq SegmentStatus.OPEN.value) and
+                        (TraceSegmentTable.startTs greaterEq Instant.ofEpochMilli(fromTsMsInclusive)) and
+                        (TraceSegmentTable.startTs less Instant.ofEpochMilli(toTsMsExclusive))
+                },
+            ) {
+                it[status] = SegmentStatus.FINALIZED.value
+                it[updatedAt] = Instant.now()
+            }
+        }
+
+    /**
      * 用户最近的一条 OPEN 段（processor 缓存 miss 时恢复在线窗口，08 §8.1 第 2 步）。
      *
      * 走部分索引 `trace_segment_user_status_idx`（`status = 1`）。
