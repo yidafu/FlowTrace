@@ -27,6 +27,15 @@ interface RecalcLockStore {
     /** 是否已被持有（在线链路每批调用一次，只读）。 */
     fun isLocked(userId: String): Boolean
 
+    /**
+     * 批量查询已被持有的锁（处理合批链路用，08 §4）：返回已加锁的 userId 集合。
+     *
+     * 实现必须用**一次 MGET 往返**覆盖全部入参；异常语义与 [isLocked] 一致——**直接抛出**，
+     * 降级方向（在线链路按全部已加锁处理）由调用方（processor 的 `RecalcGuard`）决定。
+     * 空入参直接返回空集，不打 Redis。
+     */
+    fun filterLocked(userIds: Collection<String>): Set<String>
+
     /** 释放锁；不存在时静默（重算正常结束与异常退出路径都要调）。 */
     fun unlock(userId: String)
 }

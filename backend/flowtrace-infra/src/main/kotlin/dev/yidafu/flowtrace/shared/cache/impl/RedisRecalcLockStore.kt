@@ -26,6 +26,19 @@ class RedisRecalcLockStore(
 
     override fun isLocked(userId: String): Boolean = redis.hasKey(keyOf(userId))
 
+    /**
+     * MGET 一次覆盖全部入参（[RecalcLockStore.filterLocked] 契约）。
+     *
+     * 值语义与 [isLocked] 的 EXISTS 等价：锁值固定为 `1`，键存在则值必非 null，
+     * 「GET 返回 null」即「未被持有」。异常直接抛出，降级由调用方拍板（接口契约）。
+     */
+    override fun filterLocked(userIds: Collection<String>): Set<String> {
+        if (userIds.isEmpty()) return emptySet()
+        val distinct = userIds.distinct()
+        val values: List<String?> = redis.opsForValue().multiGet(distinct.map { keyOf(it) })
+        return distinct.filterIndexed { i, _ -> values[i] != null }.toSet()
+    }
+
     override fun unlock(userId: String) {
         redis.delete(keyOf(userId))
     }

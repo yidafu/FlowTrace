@@ -3,6 +3,7 @@ package dev.yidafu.flowtrace.process.pipeline
 import dev.yidafu.flowtrace.internal.v1.TraceMessage
 import dev.yidafu.flowtrace.process.clean.PointCleaner
 import dev.yidafu.flowtrace.process.config.ProcessorProperties
+import dev.yidafu.flowtrace.process.metrics.ProcessorMetrics
 import dev.yidafu.flowtrace.process.segment.DeviceStateStore
 import dev.yidafu.flowtrace.process.segment.MoveModeClassifier
 import dev.yidafu.flowtrace.process.segment.OnlineSegmenter
@@ -19,15 +20,14 @@ import dev.yidafu.flowtrace.shared.model.TraceSegmentDraft
 import dev.yidafu.flowtrace.shared.persistence.repository.DeviceStateLoader
 import dev.yidafu.flowtrace.shared.persistence.repository.DirtyDayRepository
 import dev.yidafu.flowtrace.shared.persistence.repository.PointsWriter
-import dev.yidafu.flowtrace.shared.persistence.repository.TracePointRepository
 import dev.yidafu.flowtrace.shared.persistence.repository.SegmentScope
+import dev.yidafu.flowtrace.shared.persistence.repository.TracePointRepository
 import dev.yidafu.flowtrace.shared.persistence.repository.TraceSegmentRepository
+import io.micrometer.core.instrument.simple.SimpleMeterRegistry
 import java.time.Duration
 import java.time.Instant
 import java.time.LocalDate
 import java.util.UUID
-import dev.yidafu.flowtrace.process.metrics.ProcessorMetrics
-import io.micrometer.core.instrument.simple.SimpleMeterRegistry
 
 /**
  * 批处理链路的测试脚手架：真实 [BatchPipeline] + 记录型仓储替身。
@@ -73,6 +73,9 @@ internal class PipelineFixture(
     var watermark: Long? = null
 
     var tombstoneHit: Boolean = false
+
+    /** 按用户命中的墓碑（合批用例区分「cycle 内谁被删、谁正常」）；与 [tombstoneHit] 取并集。 */
+    var tombstoneUsers: Set<String> = emptySet()
 
     /** 非空时墓碑查询直接抛异常，用于模拟 Redis/PG 抖动。 */
     var tombstoneFailure: RuntimeException? = null
@@ -146,6 +149,11 @@ internal class PipelineFixture(
                 return recalcLocked
             }
 
+            override fun filterLocked(userIds: Collection<String>): Set<String> {
+                recalcLockFailure?.let { throw it }
+                return if (recalcLocked) userIds.toSet() else emptySet()
+            }
+
             override fun unlock(userId: String) = Unit
         }
 
@@ -156,7 +164,12 @@ internal class PipelineFixture(
                 object : TombstoneStore {
                     override fun has(userId: String): Boolean {
                         tombstoneFailure?.let { throw it }
-                        return tombstoneHit
+                        return tombstoneHit || userId in tombstoneUsers
+                    }
+
+                    override fun filterTombstoned(userIds: Collection<String>): Set<String> {
+                        tombstoneFailure?.let { throw it }
+                        return userIds.filter { tombstoneHit || it in tombstoneUsers }.toSet()
                     }
 
                     override fun mark(
@@ -172,12 +185,22 @@ internal class PipelineFixture(
                         return watermark
                     }
 
+                    override fun maxSeenTsBatch(deviceIds: Collection<String>): Map<String, Long> {
+                        watermarkFailure?.let { throw it }
+                        return if (watermark != null) deviceIds.associateWith { watermark!! } else emptyMap()
+                    }
+
                     override fun writeIfGreater(
                         deviceId: String,
                         tsMs: Long,
                     ) {
                         watermarkFailure?.let { throw it }
                         watermarkWrites += deviceId to tsMs
+                    }
+
+                    override fun writeIfGreaterBatch(entries: Map<String, Long>) {
+                        watermarkFailure?.let { throw it }
+                        entries.forEach { (deviceId, tsMs) -> watermarkWrites += deviceId to tsMs }
                     }
                 },
             props = props,
