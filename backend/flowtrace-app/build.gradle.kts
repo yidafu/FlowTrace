@@ -26,6 +26,9 @@ dependencies {
     testImplementation("org.springframework.boot:spring-boot-starter-webmvc-test")
     testImplementation("org.springframework.boot:spring-boot-starter-actuator-test")
     testImplementation("org.jetbrains.kotlin:kotlin-test-junit5")
+    // 测试进程内为 Exposed transaction{} 提供事务管理器（PipelineFixture 注册 H2 内存库，
+    // 只开事务、不执行 SQL）；版本由 Spring Boot BOM 管理
+    testImplementation("com.h2database:h2")
     testRuntimeOnly("org.junit.platform:junit-platform-launcher")
 }
 

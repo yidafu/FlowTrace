@@ -40,6 +40,24 @@ class RecalcGuard(
         }
 
     /**
+     * 批量查询（合批链路，08 §4）：一次 MGET 覆盖一个 poll cycle 内的全部 userId。
+     *
+     * 降级方向与 [isLocked] 相反于加锁路径且更保守：查询失败时**全部按已加锁**处理——
+     * 宁可这 cycle 少分一段（dirty_day 重算会补上），也不能与正在重写的两条路径互删。
+     */
+    fun filterLocked(userIds: Collection<String>): Set<String> =
+        try {
+            lockStore.filterLocked(userIds)
+        } catch (ex: Exception) {
+            log.warn(
+                "重算锁批量查询失败，按全部已加锁处理（本 cycle 跳过分段并入 dirty_day） size={} cause={}",
+                userIds.size,
+                ex.message,
+            )
+            userIds.toSet()
+        }
+
+    /**
      * 尝试加锁（SETNX + TTL）：已持有则返回 false（调用方应让路，不要等）。
      * 存储异常时同样返回 false——加不上锁就不该开始重算。
      */

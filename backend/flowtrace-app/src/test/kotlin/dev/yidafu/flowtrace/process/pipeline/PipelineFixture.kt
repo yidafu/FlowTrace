@@ -24,6 +24,7 @@ import dev.yidafu.flowtrace.shared.persistence.repository.SegmentScope
 import dev.yidafu.flowtrace.shared.persistence.repository.TracePointRepository
 import dev.yidafu.flowtrace.shared.persistence.repository.TraceSegmentRepository
 import io.micrometer.core.instrument.simple.SimpleMeterRegistry
+import org.jetbrains.exposed.v1.jdbc.Database
 import java.time.Duration
 import java.time.Instant
 import java.time.LocalDate
@@ -47,6 +48,10 @@ internal class PipelineFixture(
 ) {
     /** 实际交给 `trace_point` 的行（已清洗）。 */
     val writtenPoints = mutableListOf<TracePoint>()
+
+    /** `batchInsertIgnore` 的调用次数：合批用例用它断言「一个 cycle 只写一次点」。 */
+    var pointsWriteCalls = 0
+        private set
 
     /** 每次 `replaceTail` 的入参摘要。 */
     val segmentWrites = mutableListOf<SegmentWrite>()
@@ -221,6 +226,7 @@ internal class PipelineFixture(
             pointsWriter =
                 object : PointsWriter(TracePointRepository()) {
                     override fun batchInsertIgnore(rows: List<TracePoint>): Int {
+                        pointsWriteCalls++
                         writtenPoints += rows
                         return rows.size
                     }
@@ -286,6 +292,18 @@ internal class PipelineFixture(
             .build()
 
     companion object {
+        /**
+         * 测试进程内注册一次 H2 内存库：真实 [BatchPipeline] 的 db_txn 阶段要用 Exposed
+         * `transaction {}` 开事务，未 `Database.connect` 时默认 manager 是
+         * `NotInitializedTransactionManager`，transaction 一进来就 ClassCastException。
+         * 仓储出口全是替身，这个库不建表、不执行任何 SQL，只为让事务管理器可用。
+         */
+        private val exposedDatabase: Database =
+            Database.connect(
+                "jdbc:h2:mem:flowtrace-pipeline-test;DB_CLOSE_DELAY=-1",
+                driver = "org.h2.Driver",
+            )
+
         const val BATCH_ID = "0190f2a0-0000-7000-8000-0000000000aa"
         const val DEVICE_ID = "dev-1"
         const val USER_ID = "u-1"

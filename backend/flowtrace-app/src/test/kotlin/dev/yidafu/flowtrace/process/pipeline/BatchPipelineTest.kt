@@ -9,14 +9,16 @@ import kotlin.test.assertFalse
 import kotlin.test.assertTrue
 
 /**
- * 批处理主链路测试（06 §3.2 / §3.6，08 §12）。
+ * 批处理主链路测试（06 §3.2 / §3.6，08 §4、§12）。
  *
  * 覆盖的是「分支选错就静默丢数据」的几处判断，而不是清洗/分段的算法细节
  * （算法在 [dev.yidafu.flowtrace.process.clean.PointCleaner] 与 segment 包各自的用例里）：
  * - 墓碑命中：整批丢弃，且**不能**顺手 markProcessed / 刷墓碑 TTL；
  * - 迟到批：点照常落库，但跳过分段与批状态更新（留给重算）；
  * - 重算锁占用：同样跳过分段；迟到优先于重算锁（`recalcSkipped` 只标记「非迟到」的情况）；
- * - 正常批：落点 → 分段（尾部窗口 OPEN）→ 置 PROCESSED。
+ * - 正常批：落点 → 分段（尾部窗口 OPEN）→ 置 PROCESSED；
+ * - 合批（08 §4）：一个 cycle 共用一次点 INSERT / 一次水位推进，分支批（墓碑/迟到）
+ *   只影响自己、不拖累同 cycle 的正常批。
  */
 class BatchPipelineTest {
     @Test
@@ -168,6 +170,162 @@ class BatchPipelineTest {
         assertTrue(fixture.writtenPoints.isEmpty(), "全零岛不该产生任何 trace_point 行")
         assertTrue(fixture.segmentWrites.isEmpty(), "窗口里没有点，flush 不应写空段")
         assertEquals(1, fixture.processedBatchIds.size, "批已处理完（只是点全被过滤），仍要收尾")
+    }
+
+    @Test
+    fun `合批两批共用一个事务 一次写点 逐批分段`() {
+        val fixture = PipelineFixture()
+        val pointsA =
+            listOf(
+                PipelineFixture.point(1_000),
+                PipelineFixture.point(2_000, lngQ = PipelineFixture.LNG_Q + 10),
+                PipelineFixture.point(3_000, lngQ = PipelineFixture.LNG_Q + 20),
+            )
+        val pointsB =
+            listOf(
+                PipelineFixture.point(1_100),
+                PipelineFixture.point(2_100, lngQ = PipelineFixture.LNG_Q + 10),
+                PipelineFixture.point(3_100, lngQ = PipelineFixture.LNG_Q + 20),
+            )
+        val first =
+            fixture.message(
+                pointsA,
+                batchId = "0190f2a0-0000-7000-8000-0000000000b1",
+                deviceId = "dev-1",
+                userId = "u-1",
+            )
+        val second =
+            fixture.message(
+                pointsB,
+                batchId = "0190f2a0-0000-7000-8000-0000000000b2",
+                deviceId = "dev-2",
+                userId = "u-2",
+            )
+
+        val results = fixture.pipeline.processAll(listOf(first, second))
+
+        assertEquals(2, results.size)
+        results.forEach {
+            assertEquals(3, it.kept)
+            assertFalse(it.tombstoned)
+            assertFalse(it.late)
+        }
+        assertEquals(1, fixture.pointsWriteCalls, "一个 cycle 的点必须合进一次 INSERT")
+        assertEquals(6, fixture.writtenPoints.size)
+        assertEquals(2, fixture.segmentWrites.size, "分段仍逐批 flush（每设备一次）")
+        fixture.segmentWrites.forEach { assertEquals(SegmentStatus.OPEN, it.status) }
+        assertEquals(2, fixture.processedBatchIds.size)
+        assertEquals(
+            listOf("dev-1" to 3_000L, "dev-2" to 3_100L),
+            fixture.watermarkWrites,
+            "一次多键 EVAL 推进两个设备的水位",
+        )
+    }
+
+    @Test
+    fun `合批同设备多批水位只推进一次取最大`() {
+        val fixture = PipelineFixture()
+        val first =
+            fixture.message(
+                listOf(
+                    PipelineFixture.point(1_000),
+                    PipelineFixture.point(3_000, lngQ = PipelineFixture.LNG_Q + 10),
+                ),
+                batchId = "0190f2a0-0000-7000-8000-0000000000c1",
+            )
+        val second =
+            fixture.message(
+                listOf(
+                    PipelineFixture.point(4_000),
+                    PipelineFixture.point(6_000, lngQ = PipelineFixture.LNG_Q + 10),
+                ),
+                batchId = "0190f2a0-0000-7000-8000-0000000000c2",
+            )
+
+        fixture.pipeline.processAll(listOf(first, second))
+
+        assertEquals(1, fixture.pointsWriteCalls)
+        assertEquals(4, fixture.writtenPoints.size)
+        assertEquals(2, fixture.segmentWrites.size, "同设备两批仍各 flush 一次（按 poll 顺序保序）")
+        assertEquals(
+            listOf(PipelineFixture.DEVICE_ID to 6_000L),
+            fixture.watermarkWrites,
+            "同设备多批只传一次、取最大批尾 ts：writeIfGreater 单调，与逐批写终态一致",
+        )
+        assertEquals(2, fixture.processedBatchIds.size)
+    }
+
+    @Test
+    fun `合批中墓碑批整批丢弃 其余批照常`() {
+        val fixture = PipelineFixture()
+        fixture.tombstoneUsers = setOf(PipelineFixture.USER_ID)
+        val doomed =
+            fixture.message(
+                listOf(PipelineFixture.point(1_000), PipelineFixture.point(2_000, lngQ = PipelineFixture.LNG_Q + 10)),
+                batchId = "0190f2a0-0000-7000-8000-0000000000d1",
+                deviceId = "dev-1",
+                userId = "u-1",
+            )
+        val normal =
+            fixture.message(
+                listOf(PipelineFixture.point(1_500), PipelineFixture.point(2_500, lngQ = PipelineFixture.LNG_Q + 10)),
+                batchId = "0190f2a0-0000-7000-8000-0000000000d2",
+                deviceId = "dev-2",
+                userId = "u-2",
+            )
+
+        val results = fixture.pipeline.processAll(listOf(doomed, normal))
+
+        assertTrue(results[0].tombstoned)
+        assertEquals(0, results[0].kept)
+        assertFalse(results[1].tombstoned)
+        assertEquals(2, results[1].kept)
+        assertEquals(1, fixture.pointsWriteCalls, "墓碑批剔除后，剩余批仍合一次 INSERT")
+        assertEquals(2, fixture.writtenPoints.size, "墓碑批的点不能落库，正常批的点照常")
+        assertEquals(
+            listOf(UUID.fromString("0190f2a0-0000-7000-8000-0000000000d1") to "TOMBSTONE"),
+            fixture.failedBatches,
+        )
+        assertEquals(listOf(UUID.fromString("0190f2a0-0000-7000-8000-0000000000d2")), fixture.processedBatchIds)
+        assertEquals(1, fixture.segmentWrites.size, "只有正常批走分段")
+        assertEquals(
+            listOf("dev-2" to 2_500L),
+            fixture.watermarkWrites,
+            "墓碑批不参与水位推进",
+        )
+    }
+
+    @Test
+    fun `合批中迟到批跳过分段 正常批照常`() {
+        val fixture = PipelineFixture()
+        fixture.watermark = 10_000_000L
+        val late =
+            fixture.message(
+                listOf(PipelineFixture.point(1_000_000), PipelineFixture.point(1_001_000)),
+                batchId = "0190f2a0-0000-7000-8000-0000000000e1",
+                deviceId = "dev-1",
+            )
+        val normal =
+            fixture.message(
+                listOf(
+                    PipelineFixture.point(9_500_000),
+                    PipelineFixture.point(9_501_000, lngQ = PipelineFixture.LNG_Q + 10),
+                ),
+                batchId = "0190f2a0-0000-7000-8000-0000000000e2",
+                deviceId = "dev-2",
+            )
+
+        val results = fixture.pipeline.processAll(listOf(late, normal))
+
+        assertTrue(results[0].late)
+        assertTrue(results[0].queuedDays > 0, "迟到批要登记 dirty_day")
+        assertFalse(results[1].late)
+        assertEquals(1, fixture.pointsWriteCalls)
+        assertEquals(4, fixture.writtenPoints.size, "迟到批与正常批的点合并进同一次 INSERT（2+2），迟到的点不落库重算就没有输入")
+        assertEquals(1, fixture.enqueuedDays.size)
+        assertEquals(PipelineFixture.USER_ID, fixture.enqueuedDays.single().first)
+        assertEquals(1, fixture.segmentWrites.size, "迟到批跳过分段，正常批照常 flush")
+        assertEquals(2, fixture.processedBatchIds.size, "迟到与正常批都置 PROCESSED（职责都已结束）")
     }
 
     @Test

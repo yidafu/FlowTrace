@@ -92,7 +92,8 @@ flowtrace:
     consumer-group: processor-group    # 与 realtime 分键，避免多模块单体撞名
     concurrency: 8                     # 分区数 2026-11-21 已扩到 16，此处仍保 8：16 并发在饱和档未跑出收益（见 docs/design/09-performance.md §3.1）；
                                        # 约束是 concurrency × 实例数 ≤ 分区数，超出的线程拿不到分区只会空转
-    poll-records: 100
+    poll-records: 100                  # 合并写 cycle 的批数上限（08 §4）：固定段（MGET/提交/fsync）按它摊薄；
+                                       # 代价是可重试异常时整个 cycle 重放（幂等吸收）与单事务行数线性增长
     watermark-drift-ms: 600000         # 10min 乱序水位窗口
     clean-accuracy-cm: 10000
     clean-accuracy-lone-ms: 600000
@@ -105,7 +106,12 @@ flowtrace:
     dp-storage-epsilon-m: 5
     points-write-batch: 1000
     open-seg-max-points: 5000          # 单段点数上限，达到即强制分段（08 §8.5）
-    device-state-cache-size: 2000      # 每 consumer 的设备状态 LRU 容量
+    device-state-cache-size: 25000     # 设备状态 LRU 容量（所有消费线程共享一个 store）。
+                                       # 必须覆盖并发上报设备数：miss 一次要回源 3 条 SQL，且淘汰会触发
+                                       # 一次 OPEN flush、重载后首 flush 又是整窗重写——容量 < 舰队时这些
+                                       # 开销常态化（2026-11-21 实测 20k 设备 vs 2k 缓存即如此）。
+                                       # 内存代价：每设备状态含 OPEN 窗口全部点（上限 open-seg-max-points），
+                                       # 常规窗口几十点 ≈ 数十 KB/设备；按「并发设备数 × 常态窗口」估堆预算。
     future-ms: 600000                  # 未来时间容忍（清洗规则）
     batch-timeout-ms: 60000            # 单批墙钟上限，超过按毒丸投 DLQ（06 §3.7）
     retry-backoff-ms: 2000             # 可重试异常退避起值（无限重试）

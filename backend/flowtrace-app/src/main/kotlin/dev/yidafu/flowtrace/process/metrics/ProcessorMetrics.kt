@@ -65,10 +65,18 @@ class ProcessorMetrics(
     /**
      * 管道分段计时：`ft_processor_stage_seconds{stage}`（count/sum/max）。
      *
-     * stage 取值见 [BatchPipeline] 的 `stage(...)` 调用点：decode / tombstone / watermark /
-     * clean / recalc_guard / db_points / db_segment / db_dirty / db_txn / status_enqueue / total。
+     * stage 取值见 [BatchPipeline] / [dev.yidafu.flowtrace.process.listener.TraceBatchListener] 的
+     * `stage(...)` 调用点：decode / tombstone / watermark / clean（嵌套 clean_state / clean_points）/
+     * recalc_guard / db_points / db_segment / db_dirty / db_txn / status_enqueue / total。
      * `db_txn` 是整个事务的墙钟，扣掉 db_points / db_segment / db_dirty 后的残差就是
-     * Exposed 事务管理与 PG 提交（fsync）的开销。
+     * Exposed 事务管理与 PG 提交（fsync）的开销；`clean` 同理，扣掉 clean_state / clean_points
+     * 的残差可忽略（两者已覆盖全部）——拆子阶段是为了区分「状态回源（LRU miss = 3 条 SQL）」
+     * 与「逐点清洗计算」的占比。
+     *
+     * **计数口径 = cycle 数（2026-11-21 合批后）**：一次 poll（上限 poll-records）的全部批共用
+     * 一个 MGET/事务/提交，stage 每 cycle 计一次；每批摊薄值 = sum ÷ count ÷ 平均 cycle 批数
+     * （平均批数从 `processor 批处理完成` 日志的 `batches=` 聚合）。空 cycle（全部墓碑/全部坏消息）
+     * 会拉低平均批数，对比历史单批口径时注意。
      *
      * 用墙钟而不是 CPU 时间：瓶颈是 IO 等待，CPU 采样看不见它。
      */

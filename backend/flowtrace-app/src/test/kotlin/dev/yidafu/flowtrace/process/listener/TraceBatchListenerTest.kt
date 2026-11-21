@@ -16,11 +16,13 @@ import kotlin.test.assertFailsWith
 import kotlin.test.assertTrue
 
 /**
- * 消费入口测试（06 §3.1，08 §11）：只验证「解码 → 交给管道 → ack / 抛出」这条责任链。
+ * 消费入口测试（06 §3.1，08 §4、§11）：只验证「解码 → 交给管道 → ack / 抛出」这条责任链。
  *
- * 错误语义必须与 08 §11 一致，写反的后果都是线上事故：
- * - 确定性失败（空消息 / 解析失败 / 批头非法）必须 **ack 丢弃**——抛出会让坏消息永远卡住分区；
- * - 可重试失败（管道抛异常）必须 **不 ack 且向上抛**——吞掉就等于把一次 PG 重启放大成上千条丢批。
+ * 合批后监听器一次收到一个 poll cycle（`List<ConsumerRecord>`），错误语义与单记录时代逐条对应：
+ * - 确定性失败（空消息 / 解析失败 / 批头非法）必须 **投 DLQ 后继续处理同 cycle 的好消息**，
+ *   末尾一次性 ack——抛出会让坏消息永远卡住分区；
+ * - 可重试失败（管道抛异常）必须 **不 ack 且向上抛**——吞掉就等于把一次 PG 重启放大成上千条丢批，
+ *   重放按 cycle 整体进行（幂等吸收）。
  */
 class TraceBatchListenerTest {
     @Test
@@ -28,7 +30,7 @@ class TraceBatchListenerTest {
         val fixture = fixture()
         val ack = RecordingAck()
 
-        listener(fixture).onBatch(record(null), ack)
+        listener(fixture).onBatches(listOf(record(null)), ack)
 
         assertEquals(1, ack.count)
         assertTrue(fixture.processedBatchIds.isEmpty(), "空消息不该进管道")
@@ -39,7 +41,7 @@ class TraceBatchListenerTest {
         val fixture = fixture()
         val ack = RecordingAck()
 
-        listener(fixture).onBatch(record(ByteArray(0)), ack)
+        listener(fixture).onBatches(listOf(record(ByteArray(0))), ack)
 
         assertEquals(1, ack.count)
         assertTrue(fixture.processedBatchIds.isEmpty())
@@ -51,7 +53,7 @@ class TraceBatchListenerTest {
         val ack = RecordingAck()
         val dlq = RecordingDlq()
 
-        listener(fixture, dlq = dlq).onBatch(record(byteArrayOf(0xFF.toByte(), 0xFF.toByte(), 0xFF.toByte())), ack)
+        listener(fixture, dlq = dlq).onBatches(listOf(record(byteArrayOf(0xFF.toByte(), 0xFF.toByte(), 0xFF.toByte()))), ack)
 
         assertEquals(1, ack.count, "确定性失败必须 ack，否则该分区被坏消息永久卡住")
         assertEquals("INVALID_PROTOBUF", dlq.published.single().errorCode, "坏字节要留证据，不能只打日志")
@@ -75,7 +77,7 @@ class TraceBatchListenerTest {
 
         val dlq = RecordingDlq()
         val status = RecordingStatus()
-        listener(fixture, dlq = dlq, status = status).onBatch(record(payload), ack)
+        listener(fixture, dlq = dlq, status = status).onBatches(listOf(record(payload)), ack)
 
         assertEquals(1, ack.count)
         assertEquals("PROTOCOL_ERROR", dlq.published.single().errorCode)
@@ -98,7 +100,7 @@ class TraceBatchListenerTest {
 
         val dlq = RecordingDlq()
         val status = RecordingStatus()
-        listener(fixture, dlq = dlq, status = status).onBatch(record(payload), ack)
+        listener(fixture, dlq = dlq, status = status).onBatches(listOf(record(payload)), ack)
 
         assertEquals(1, ack.count)
         assertEquals("PROTOCOL_ERROR", dlq.published.single().errorCode)
@@ -122,7 +124,7 @@ class TraceBatchListenerTest {
 
         val dlq = RecordingDlq()
         val status = RecordingStatus()
-        listener(fixture, dlq = dlq, status = status).onBatch(record(payload), ack)
+        listener(fixture, dlq = dlq, status = status).onBatches(listOf(record(payload)), ack)
 
         assertEquals(1, ack.count, "坏批号是确定性失败，抛出会让分区被同一条消息永久按住")
         assertEquals("PROTOCOL_ERROR", dlq.published.single().errorCode)
@@ -145,11 +147,46 @@ class TraceBatchListenerTest {
                 ).toByteArray()
 
         val dlq = RecordingDlq()
-        listener(fixture, dlq = dlq).onBatch(record(payload), ack)
+        listener(fixture, dlq = dlq).onBatches(listOf(record(payload)), ack)
 
-        assertEquals(1, ack.count)
+        assertEquals(1, ack.count, "一个 cycle 只 ack 一次")
         assertTrue(dlq.published.isEmpty(), "正常批不该进死信")
         assertEquals(1, fixture.processedBatchIds.size, "成功路径应把批置为 PROCESSED")
+    }
+
+    @Test
+    fun `同 cycle 好坏混投 坏的进死信 好的照常处理`() {
+        val fixture = fixture()
+        val ack = RecordingAck()
+        val dlq = RecordingDlq()
+        val bad = record(byteArrayOf(0xFF.toByte(), 0xFF.toByte(), 0xFF.toByte()))
+        val good =
+            record(
+                fixture
+                    .message(
+                        listOf(PipelineFixture.point(1_000), PipelineFixture.point(2_000, lngQ = PipelineFixture.LNG_Q + 10)),
+                    ).toByteArray(),
+            )
+
+        listener(fixture, dlq = dlq).onBatches(listOf(bad, good), ack)
+
+        assertEquals(1, ack.count, "整个 cycle 末尾一次性 ack（含被 DLQ 的坏消息）")
+        assertEquals("INVALID_PROTOBUF", dlq.published.single().errorCode, "坏消息投 DLQ 留证据")
+        assertEquals(1, fixture.processedBatchIds.size, "同 cycle 的好消息不能被坏消息拖累")
+        assertEquals(2, fixture.writtenPoints.size)
+    }
+
+    @Test
+    fun `cycle 内全部坏消息也要 ack 释放分区`() {
+        val fixture = fixture()
+        val ack = RecordingAck()
+        val dlq = RecordingDlq()
+
+        listener(fixture, dlq = dlq).onBatches(listOf(record(byteArrayOf(0xFF.toByte())), record(byteArrayOf(0x00.toByte()))), ack)
+
+        assertEquals(1, ack.count, "没有好消息可处理时同样要 ack，否则分区被两条坏消息永久按住")
+        assertEquals(2, dlq.published.size)
+        assertTrue(fixture.processedBatchIds.isEmpty())
     }
 
     @Test
@@ -159,7 +196,7 @@ class TraceBatchListenerTest {
         val ack = RecordingAck()
         val payload = fixture.message(listOf(PipelineFixture.point(1_000))).toByteArray()
 
-        val ex = assertFailsWith<IllegalStateException> { listener(fixture).onBatch(record(payload), ack) }
+        val ex = assertFailsWith<IllegalStateException> { listener(fixture).onBatches(listOf(record(payload)), ack) }
 
         assertEquals("pg down", ex.message)
         assertEquals(0, ack.count, "可重试异常不能 ack，否则会静默丢批")

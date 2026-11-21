@@ -86,6 +86,11 @@ class ProcessorKafkaConfig(
             setConsumerFactory(cf)
             setConcurrency(props.concurrency)
             containerProperties.ackMode = ContainerProperties.AckMode.MANUAL
+            // batch 监听必须显式声明：仅靠方法签名 List<ConsumerRecord> 在 spring-kafka 4.x 下
+            // 不会被识别为 batch（2026-11-21 实测：容器走了 record 路径，把 payload 字节当
+            // ConsumerRecord 传入 → 每条 ClassCastException，且退避耗尽后被跳过丢批）。
+            // 显式 setBatchListener 后，一次 poll 的记录整批进监听器（08 §4 合并写的前提）。
+            setBatchListener(true)
             setCommonErrorHandler(traceProcessorErrorHandler())
         }
 
