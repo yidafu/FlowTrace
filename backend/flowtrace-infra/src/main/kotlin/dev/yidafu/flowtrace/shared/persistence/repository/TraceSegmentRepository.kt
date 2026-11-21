@@ -5,6 +5,7 @@ import dev.yidafu.flowtrace.shared.model.MoveMode
 import dev.yidafu.flowtrace.shared.model.SegmentKind
 import dev.yidafu.flowtrace.shared.model.SegmentStatus
 import dev.yidafu.flowtrace.shared.model.TraceSegmentDraft
+import dev.yidafu.flowtrace.shared.persistence.statement.MultiRowInsertIgnoreStatement
 import dev.yidafu.flowtrace.shared.persistence.table.TraceSegmentTable
 import org.jetbrains.exposed.v1.core.Op
 import org.jetbrains.exposed.v1.core.ResultRow
@@ -17,10 +18,11 @@ import org.jetbrains.exposed.v1.core.SqlExpressionBuilder.less
 import org.jetbrains.exposed.v1.core.and
 import org.jetbrains.exposed.v1.core.or
 import org.jetbrains.exposed.v1.core.sum
-import org.jetbrains.exposed.v1.jdbc.batchInsert
 import org.jetbrains.exposed.v1.jdbc.deleteWhere
 import org.jetbrains.exposed.v1.jdbc.select
 import org.jetbrains.exposed.v1.jdbc.selectAll
+import org.jetbrains.exposed.v1.jdbc.statements.BatchInsertBlockingExecutable
+import org.jetbrains.exposed.v1.jdbc.transactions.TransactionManager
 import org.jetbrains.exposed.v1.jdbc.transactions.transaction
 import org.jetbrains.exposed.v1.jdbc.update
 import org.springframework.stereotype.Repository
@@ -107,8 +109,8 @@ open class TraceSegmentRepository {
      *   晚到的点可能把前一条 MOVE 段的前半截重判为 STAY，`segment_id` 随之变化，
      *   只 upsert 会留下过期的 MOVE 段；
      * - 删除带 `device_id`（见 [SegmentScope]）；
-     * - 写入用 `batchInsert(ignore = true)`：窗口内行已被删空，冲突只可能来自并发重放，
-     *   此时丢弃重复行比覆盖更安全（同设备同窗口理论上只有一个消费者）。
+     * - 写入用单条多行 `INSERT ... ON CONFLICT (start_ts, segment_id) DO NOTHING`（见 [insertDraftsInTx]）：
+     *   窗口内行已被删空，冲突只可能来自并发重放，此时丢弃重复行比覆盖更安全（同设备同窗口理论上只有一个消费者）。
      *
      * @param scope 用户 + 设备 + 会话范围
      * @param fromTsMs 窗口首点 ts（含），删除 `start_ts >= fromTsMs` 的段
@@ -156,7 +158,18 @@ open class TraceSegmentRepository {
         transaction { insertDraftsInTx(scope, drafts, status) }
     }
 
-    /** 段草稿落库的公共实现；**调用方必须已在事务内**（`replaceTail` 与 `insertDrafts` 共用）。 */
+    /**
+     * 段草稿落库的公共实现；**调用方必须已在事务内**（`replaceTail` 与 `insertDrafts` 共用）。
+     *
+     * **单条多行** `INSERT ... VALUES (...),(...) ON CONFLICT (start_ts, segment_id) DO NOTHING`，
+     * 由 [MultiRowInsertIgnoreStatement] 生成与参数绑定（列序、引号与值类型都走
+     * [TraceSegmentTable] 各列的定义，不再手写 SQL 拼接）。
+     *
+     * 为什么不用 Exposed 的 `batchInsert(ignore = true)`：那是 JDBC batch（N 行 = N 条 INSERT），
+     * pgjdbc 的 `reWriteBatchedInserts` **不会改写带 `ON CONFLICT` 的语句**（URL 里已配 true 也没用），
+     * 与 `TracePointRepository.batchInsertIgnore` 同款问题——逐行 vs 多行单语句实测差 10 倍
+     * （docs/reports/2026-11-21-4c8g-verification.md §8）。
+     */
     private fun insertDraftsInTx(
         scope: SegmentScope,
         drafts: List<TraceSegmentDraft>,
@@ -165,28 +178,35 @@ open class TraceSegmentRepository {
         if (drafts.isEmpty()) return
         val now = Instant.now()
         drafts.chunked(BATCH_SIZE).forEach { chunk ->
-            TraceSegmentTable
-                .batchInsert(chunk, ignore = true, shouldReturnGeneratedValues = false) { d ->
-                    this[TraceSegmentTable.startTs] = Instant.ofEpochMilli(d.startTsMs)
-                    this[TraceSegmentTable.segmentId] = d.segmentId
-                    this[TraceSegmentTable.userId] = scope.userId
-                    this[TraceSegmentTable.deviceId] = scope.deviceId
-                    this[TraceSegmentTable.sessionId] = scope.sessionId
-                    this[TraceSegmentTable.kind] = d.kind.value
-                    this[TraceSegmentTable.moveMode] = d.moveMode.value
-                    this[TraceSegmentTable.endTs] = Instant.ofEpochMilli(d.endTsMs)
-                    this[TraceSegmentTable.pointCount] = d.pointCount
-                    this[TraceSegmentTable.distanceM] = d.distanceM
-                    this[TraceSegmentTable.geometry] = d.geometryWkt
-                    this[TraceSegmentTable.stayLatQ] = d.stayLatQ
-                    this[TraceSegmentTable.stayLngQ] = d.stayLngQ
-                    this[TraceSegmentTable.minLatQ] = d.bbox.minLatQ
-                    this[TraceSegmentTable.maxLatQ] = d.bbox.maxLatQ
-                    this[TraceSegmentTable.minLngQ] = d.bbox.minLngQ
-                    this[TraceSegmentTable.maxLngQ] = d.bbox.maxLngQ
-                    this[TraceSegmentTable.status] = status.value
-                    this[TraceSegmentTable.updatedAt] = now
-                }
+            val stmt =
+                MultiRowInsertIgnoreStatement(
+                    table = TraceSegmentTable,
+                    conflictKeys = listOf(TraceSegmentTable.startTs, TraceSegmentTable.segmentId),
+                )
+            for (d in chunk) {
+                // addBatch() 先于赋值：Exposed 的 addBatch 会把当前 values 快照进 data 再换出新行
+                stmt.addBatch()
+                stmt[TraceSegmentTable.startTs] = Instant.ofEpochMilli(d.startTsMs)
+                stmt[TraceSegmentTable.segmentId] = d.segmentId
+                stmt[TraceSegmentTable.userId] = scope.userId
+                stmt[TraceSegmentTable.deviceId] = scope.deviceId
+                stmt[TraceSegmentTable.sessionId] = scope.sessionId
+                stmt[TraceSegmentTable.kind] = d.kind.value
+                stmt[TraceSegmentTable.moveMode] = d.moveMode.value
+                stmt[TraceSegmentTable.endTs] = Instant.ofEpochMilli(d.endTsMs)
+                stmt[TraceSegmentTable.pointCount] = d.pointCount
+                stmt[TraceSegmentTable.distanceM] = d.distanceM
+                stmt[TraceSegmentTable.geometry] = d.geometryWkt
+                stmt[TraceSegmentTable.stayLatQ] = d.stayLatQ
+                stmt[TraceSegmentTable.stayLngQ] = d.stayLngQ
+                stmt[TraceSegmentTable.minLatQ] = d.bbox.minLatQ
+                stmt[TraceSegmentTable.maxLatQ] = d.bbox.maxLatQ
+                stmt[TraceSegmentTable.minLngQ] = d.bbox.minLngQ
+                stmt[TraceSegmentTable.maxLngQ] = d.bbox.maxLngQ
+                stmt[TraceSegmentTable.status] = status.value
+                stmt[TraceSegmentTable.updatedAt] = now
+            }
+            BatchInsertBlockingExecutable(stmt).execute(TransactionManager.current())
         }
     }
 
