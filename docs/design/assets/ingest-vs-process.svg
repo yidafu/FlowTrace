@@ -1,0 +1,55 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 680 340" width="680" height="340" font-family="-apple-system, BlinkMacSystemFont, 'PingFang SC', 'Helvetica Neue', sans-serif">
+  <rect width="680" height="340" fill="#ffffff"/>
+
+  <!-- 标题 -->
+  <text x="70" y="24" font-size="13" font-weight="600" fill="#0f172a">接入 vs 处理：受理一路涨到 108k 点/s，处理钉在 14.7k——差值全部变成 Kafka 积压</text>
+  <text x="70" y="40" font-size="11" fill="#64748b">4C8G 双机，A 组阶梯（每档 60s 稳态，成功率均 100%、0 个 429）</text>
+
+  <!-- 绘图区：x 80–620, y 60–280；y 轴 0–120k → 1.833px/k -->
+  <g stroke="#e2e8f0" stroke-width="1">
+    <line x1="80" y1="280" x2="620" y2="280"/>
+    <line x1="80" y1="216.7" x2="620" y2="216.7"/>
+    <line x1="80" y1="153.3" x2="620" y2="153.3"/>
+    <line x1="80" y1="90" x2="620" y2="90"/>
+    <line x1="80" y1="60" x2="80" y2="280"/>
+  </g>
+  <g font-size="10" fill="#94a3b8" text-anchor="end">
+    <text x="72" y="284">0</text>
+    <text x="72" y="221">30k</text>
+    <text x="72" y="157">60k</text>
+    <text x="72" y="94">90k</text>
+    <text x="72" y="64">120k</text>
+  </g>
+
+  <!-- 处理上限参考线 14,713 → y=253 -->
+  <line x1="80" y1="253" x2="620" y2="253" stroke="#dc2626" stroke-width="1.6" stroke-dasharray="6 4"/>
+  <text x="618" y="246" font-size="10" font-weight="600" fill="#dc2626" text-anchor="end">处理上限 14,713 点/s（4 线程 / sync=on）</text>
+
+  <!-- 受理 bars：35,257 / 53,472 / 90,360 / 108,266 -->
+  <rect x="112.5" y="215.4" width="70" height="64.6" fill="#93c5fd"/>
+  <rect x="247.5" y="182.0" width="70" height="98.0" fill="#60a5fa"/>
+  <rect x="382.5" y="114.3" width="70" height="165.7" fill="#3b82f6"/>
+  <rect x="517.5" y="81.5" width="70" height="198.5" fill="#2563eb"/>
+
+  <g font-size="10" fill="#1e40af" text-anchor="middle">
+    <text x="147.5" y="209">35,257</text>
+    <text x="282.5" y="176">53,472</text>
+    <text x="417.5" y="108">90,360</text>
+    <text x="552.5" y="75" font-weight="600">108,266</text>
+  </g>
+
+  <!-- 积压标注 -->
+  <g fill="#dc2626" font-size="10">
+    <text x="417.5" y="130" text-anchor="middle">↑ 积压</text>
+    <text x="552.5" y="97" text-anchor="middle" font-weight="600">↑ 积压</text>
+  </g>
+
+  <g font-size="11" fill="#475569" text-anchor="middle">
+    <text x="147.5" y="298">4 万设备</text>
+    <text x="282.5" y="298">6 万</text>
+    <text x="417.5" y="298">10 万</text>
+    <text x="552.5" y="298">15 万</text>
+  </g>
+  <text x="350" y="322" font-size="11" fill="#475569" text-anchor="middle">受理速率（点/s，HTTP → Kafka）</text>
+  <text x="620" y="334" font-size="10" fill="#94a3b8" text-anchor="end">A4 批率 2,863 &lt; A3 的 2,949：压测客户端先到顶，服务端接入上限未测到</text>
+</svg>

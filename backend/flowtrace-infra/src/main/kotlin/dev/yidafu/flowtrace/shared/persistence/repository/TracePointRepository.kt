@@ -11,7 +11,6 @@ import org.jetbrains.exposed.v1.core.SqlExpressionBuilder.greaterEq
 import org.jetbrains.exposed.v1.core.SqlExpressionBuilder.less
 import org.jetbrains.exposed.v1.core.and
 import org.jetbrains.exposed.v1.core.or
-import org.jetbrains.exposed.v1.jdbc.batchInsert
 import org.jetbrains.exposed.v1.jdbc.deleteWhere
 import org.jetbrains.exposed.v1.jdbc.selectAll
 import org.jetbrains.exposed.v1.jdbc.transactions.transaction
@@ -39,10 +38,16 @@ open class TracePointRepository {
     /**
      * 批量幂等写点（processor 第 5 步，06 §3.2）。
      *
-     * 按 1000 行一批提交，`ignore = true` 生成 `ON CONFLICT DO NOTHING`。
-     * **返回的是「尝试写入」行数而非「实际插入」行数**：PG 的 JDBC batch 对
-     * `ON CONFLICT DO NOTHING` 返回 `SUCCESS_NO_INFO`，逐行计数拿不到（08 §6.1）。
-     * 真实重复率靠离线对账（`count(*)` vs 批申报数）核，不要在热路径再加一次 SELECT。
+     * **单条多行** `INSERT ... VALUES (...),(...) ON CONFLICT (ts, point_id) DO NOTHING`，
+     * 参数化绑定（每行 16 个 `?`，值类型取 [TracePointTable] 各列的 columnType）。
+     * **返回的是「尝试写入」行数而非「实际插入」行数**（08 §6.1）：真实重复率靠离线对账
+     * （`count(*)` vs 批申报数）核，不要在热路径再加一次 SELECT。
+     *
+     * 为什么不用 Exposed 的 `batchInsert(ignore = true)`：那是 JDBC batch（30 行 = 30 条
+     * INSERT 语句），而 pgjdbc 的 `reWriteBatchedInserts` **不会改写带 `ON CONFLICT` 的
+     * 语句**（URL 里已配 true 也没用）。2026-11-21 埋点实测（docs/design/09-performance.md §9）：
+     * 同表同索引、每事务 30 行、4 并发，逐行 43.5ms vs 多行单语句 4.34ms——**10 倍**；
+     * `db_points` 阶段从 18.85ms/批 降到 ~4ms。
      *
      * @return 尝试写入的行数（含被冲突丢弃的）
      */
@@ -50,24 +55,34 @@ open class TracePointRepository {
         if (points.isEmpty()) return 0
         return transaction {
             points.chunked(BATCH_SIZE).sumOf { chunk ->
-                TracePointTable
-                    .batchInsert(chunk, ignore = true, shouldReturnGeneratedValues = false) { p ->
-                        this[TracePointTable.ts] = Instant.ofEpochMilli(p.tsMs)
-                        this[TracePointTable.pointId] = p.pointId
-                        this[TracePointTable.userId] = p.userId
-                        this[TracePointTable.deviceId] = p.deviceId
-                        this[TracePointTable.batchId] = p.batchId
-                        this[TracePointTable.sessionId] = p.sessionId
-                        this[TracePointTable.taskId] = p.taskId
-                        this[TracePointTable.latQ] = p.latQ
-                        this[TracePointTable.lngQ] = p.lngQ
-                        this[TracePointTable.accuracyCm] = p.accuracyCm
-                        this[TracePointTable.speedMps] = p.speedMps
-                        this[TracePointTable.bearingDeg] = p.bearingDeg
-                        this[TracePointTable.altitudeCm] = p.altitudeCm
-                        this[TracePointTable.locationSource] = p.source?.value?.toShort()
-                        this[TracePointTable.flags] = p.flags
-                    }.size
+                // 不含 received_at：保留默认 CURRENT_TIMESTAMP，列占位从 16 个减到 15 个
+                val rows = chunk.joinToString(",") { "(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)" }
+                val sql =
+                    "INSERT INTO trace_point (ts, point_id, user_id, device_id, batch_id, session_id, " +
+                        "task_id, lat_q, lng_q, accuracy_cm, speed_mps, bearing_deg, altitude_cm, source, flags) " +
+                        "VALUES $rows ON CONFLICT (ts, point_id) DO NOTHING"
+
+                val args = buildList {
+                    for (p in chunk) {
+                        add(TracePointTable.ts.columnType to Instant.ofEpochMilli(p.tsMs))
+                        add(TracePointTable.pointId.columnType to p.pointId)
+                        add(TracePointTable.userId.columnType to p.userId)
+                        add(TracePointTable.deviceId.columnType to p.deviceId)
+                        add(TracePointTable.batchId.columnType to p.batchId)
+                        add(TracePointTable.sessionId.columnType to p.sessionId)
+                        add(TracePointTable.taskId.columnType to p.taskId)
+                        add(TracePointTable.latQ.columnType to p.latQ)
+                        add(TracePointTable.lngQ.columnType to p.lngQ)
+                        add(TracePointTable.accuracyCm.columnType to p.accuracyCm)
+                        add(TracePointTable.speedMps.columnType to p.speedMps)
+                        add(TracePointTable.bearingDeg.columnType to p.bearingDeg)
+                        add(TracePointTable.altitudeCm.columnType to p.altitudeCm)
+                        add(TracePointTable.locationSource.columnType to p.source?.value?.toShort())
+                        add(TracePointTable.flags.columnType to p.flags)
+                    }
+                }
+                exec(sql, args)
+                chunk.size
             }
         }
     }

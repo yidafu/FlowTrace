@@ -6,6 +6,7 @@ import io.micrometer.core.instrument.MeterRegistry
 import io.micrometer.core.instrument.Tags
 import org.springframework.stereotype.Component
 import java.util.concurrent.ConcurrentHashMap
+import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicLong
 
 /**
@@ -59,6 +60,25 @@ class ProcessorMetrics(
         registry
             .counter(METRIC_POINTS, TAG_RESULT, RESULT_INSERTED, TAG_REASON, REASON_NONE)
             .increment(count.toDouble())
+    }
+
+    /**
+     * 管道分段计时：`ft_processor_stage_seconds{stage}`（count/sum/max）。
+     *
+     * stage 取值见 [BatchPipeline] 的 `stage(...)` 调用点：decode / tombstone / watermark /
+     * clean / recalc_guard / db_points / db_segment / db_dirty / db_txn / status_enqueue / total。
+     * `db_txn` 是整个事务的墙钟，扣掉 db_points / db_segment / db_dirty 后的残差就是
+     * Exposed 事务管理与 PG 提交（fsync）的开销。
+     *
+     * 用墙钟而不是 CPU 时间：瓶颈是 IO 等待，CPU 采样看不见它。
+     */
+    fun stage(
+        stage: String,
+        durationNs: Long,
+    ) {
+        registry
+            .timer(METRIC_STAGE, TAG_STAGE, stage)
+            .record(durationNs, TimeUnit.NANOSECONDS)
     }
 
     /** 被清洗规则丢弃的点：按原因分标签，一个原因一条计数。 */
@@ -120,11 +140,13 @@ class ProcessorMetrics(
         const val METRIC_DIRTY_PENDING = "ft.dirty.day.pending"
         const val METRIC_DIRTY_FAILED = "ft.dirty.day.failed"
         const val METRIC_LAG = "ft.processor.lag"
+        const val METRIC_STAGE = "ft.processor.stage"
 
         const val TAG_RESULT = "result"
         const val TAG_REASON = "reason"
         const val TAG_ERROR_CODE = "error_code"
         const val TAG_PARTITION = "partition"
+        const val TAG_STAGE = "stage"
 
         const val RESULT_INSERTED = "inserted"
         const val RESULT_DROPPED = "dropped"

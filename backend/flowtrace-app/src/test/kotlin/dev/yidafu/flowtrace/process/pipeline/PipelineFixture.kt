@@ -19,12 +19,15 @@ import dev.yidafu.flowtrace.shared.model.TraceSegmentDraft
 import dev.yidafu.flowtrace.shared.persistence.repository.DeviceStateLoader
 import dev.yidafu.flowtrace.shared.persistence.repository.DirtyDayRepository
 import dev.yidafu.flowtrace.shared.persistence.repository.PointsWriter
+import dev.yidafu.flowtrace.shared.persistence.repository.TracePointRepository
 import dev.yidafu.flowtrace.shared.persistence.repository.SegmentScope
 import dev.yidafu.flowtrace.shared.persistence.repository.TraceSegmentRepository
 import java.time.Duration
 import java.time.Instant
 import java.time.LocalDate
 import java.util.UUID
+import dev.yidafu.flowtrace.process.metrics.ProcessorMetrics
+import io.micrometer.core.instrument.simple.SimpleMeterRegistry
 
 /**
  * 批处理链路的测试脚手架：真实 [BatchPipeline] + 记录型仓储替身。
@@ -148,6 +151,7 @@ internal class PipelineFixture(
 
     val pipeline =
         BatchPipeline(
+            metrics = ProcessorMetrics(SimpleMeterRegistry()),
             tombstone =
                 object : TombstoneStore {
                     override fun has(userId: String): Boolean {
@@ -180,7 +184,7 @@ internal class PipelineFixture(
             deviceState = deviceState,
             cleaner = PointCleaner(props),
             pointsWriter =
-                object : PointsWriter() {
+                object : PointsWriter(TracePointRepository()) {
                     override fun batchInsertIgnore(rows: List<TracePoint>): Int {
                         writtenPoints += rows
                         return rows.size

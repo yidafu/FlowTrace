@@ -1,0 +1,56 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 680 300" width="680" height="300" font-family="-apple-system, BlinkMacSystemFont, 'PingFang SC', 'Helvetica Neue', sans-serif">
+  <rect width="680" height="300" fill="#ffffff"/>
+
+  <!-- 标题 -->
+  <text x="70" y="24" font-size="13" font-weight="600" fill="#0f172a">线程 1 → 4：吞吐只 ×2.1（而不是 ×4），因为单批成本被并发抬高</text>
+  <text x="70" y="40" font-size="11" fill="#64748b">4C8G 双机实测（§9）；其余 2 核留给 PG 与系统，未超 4 核预算</text>
+
+  <!-- 左面板：吞吐 -->
+  <text x="205" y="62" font-size="11" font-weight="600" fill="#475569" text-anchor="middle">吞吐（点/s）</text>
+  <g stroke="#e2e8f0" stroke-width="1">
+    <line x1="80" y1="250" x2="330" y2="250"/>
+    <line x1="80" y1="196.7" x2="330" y2="196.7"/>
+    <line x1="80" y1="143.3" x2="330" y2="143.3"/>
+    <line x1="80" y1="90" x2="330" y2="90"/>
+    <line x1="80" y1="70" x2="80" y2="250"/>
+  </g>
+  <g font-size="10" fill="#94a3b8" text-anchor="end">
+    <text x="72" y="254">0</text>
+    <text x="72" y="201">5k</text>
+    <text x="72" y="147">10k</text>
+    <text x="72" y="94">15k</text>
+  </g>
+  <rect x="120" y="156.8" width="70" height="93.2" fill="#93c5fd"/>
+  <rect x="230" y="53.8" width="70" height="196.2" fill="#2563eb"/>
+  <text x="155" y="150" font-size="11" fill="#1e40af" text-anchor="middle">6,987</text>
+  <text x="265" y="47" font-size="11" font-weight="600" fill="#1e40af" text-anchor="middle">14,713</text>
+  <text x="155" y="268" font-size="11" fill="#475569" text-anchor="middle">1 线程</text>
+  <text x="265" y="268" font-size="11" fill="#475569" text-anchor="middle">4 线程</text>
+  <text x="205" y="288" font-size="11" font-weight="600" fill="#dc2626" text-anchor="middle">吞吐只 ×2.1</text>
+
+  <!-- 右面板：单批成本（0–10ms → 180px） -->
+  <text x="505" y="62" font-size="11" font-weight="600" fill="#475569" text-anchor="middle">单批处理成本（ms）</text>
+  <g stroke="#e2e8f0" stroke-width="1">
+    <line x1="380" y1="250" x2="630" y2="250"/>
+    <line x1="380" y1="214" x2="630" y2="214"/>
+    <line x1="380" y1="178" x2="630" y2="178"/>
+    <line x1="380" y1="142" x2="630" y2="142"/>
+    <line x1="380" y1="106" x2="630" y2="106"/>
+    <line x1="380" y1="70" x2="380" y2="250"/>
+  </g>
+  <g font-size="10" fill="#94a3b8" text-anchor="end">
+    <text x="372" y="254">0</text>
+    <text x="372" y="218">2</text>
+    <text x="372" y="182">4</text>
+    <text x="372" y="146">6</text>
+    <text x="372" y="110">8</text>
+    <text x="372" y="74">10</text>
+  </g>
+  <rect x="420" y="173" width="70" height="77" fill="#fca5a5"/>
+  <rect x="530" y="102" width="70" height="148" fill="#dc2626"/>
+  <text x="455" y="166" font-size="11" fill="#b91c1c" text-anchor="middle">4.3ms</text>
+  <text x="565" y="95" font-size="11" font-weight="600" fill="#b91c1c" text-anchor="middle">8.2ms</text>
+  <text x="455" y="268" font-size="11" fill="#475569" text-anchor="middle">1 线程</text>
+  <text x="565" y="268" font-size="11" fill="#475569" text-anchor="middle">4 线程</text>
+  <text x="505" y="288" font-size="11" font-weight="600" fill="#dc2626" text-anchor="middle">单批成本 ×1.9</text>
+</svg>

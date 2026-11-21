@@ -2,6 +2,7 @@ package dev.yidafu.flowtrace.process.pipeline
 
 import dev.yidafu.flowtrace.internal.v1.TraceMessage
 import dev.yidafu.flowtrace.process.clean.DropReason
+import dev.yidafu.flowtrace.process.metrics.ProcessorMetrics
 import dev.yidafu.flowtrace.process.clean.PointCleaner
 import dev.yidafu.flowtrace.process.config.ProcessorProperties
 import dev.yidafu.flowtrace.process.segment.DeviceStateStore
@@ -66,8 +67,27 @@ class BatchPipeline(
     private val segmenter: OnlineSegmenter,
     private val batchStatus: BatchStatusSink,
     private val dirtyDay: DirtyDayRepository,
+    private val metrics: ProcessorMetrics,
 ) {
     private val log = LoggerFactory.getLogger(javaClass)
+
+    /**
+     * 分段计时包装：异常也要计入耗时，所以放 `finally`。
+     *
+     * 为什么用墙钟（nanoTime）而不是 CPU 时间：这条链路的瓶颈是 IO 等待
+     * （DB 提交、Redis 往返），CPU 采样看不见它（docs/design/09-performance.md §9）。
+     */
+    private inline fun <T> stage(
+        name: String,
+        block: () -> T,
+    ): T {
+        val start = System.nanoTime()
+        try {
+            return block()
+        } finally {
+            metrics.stage(name, System.nanoTime() - start)
+        }
+    }
 
     /**
      * 处理一批：墓碑 → 水位 → 清洗 → 落点 → 分段 → 批状态。
@@ -86,13 +106,18 @@ class BatchPipeline(
      * 幂等口径：`pointId`（batchId+idx）与 `segmentId`（userId+sessionId+startTs）都是确定性派生，
      * 所以「已 ack 未提交」导致的重放是安全的；`dirty_day` 入队也带 ON CONFLICT DO NOTHING。
      */
-    fun process(message: TraceMessage.TraceBatchMessage): BatchResult {
+    fun process(message: TraceMessage.TraceBatchMessage): BatchResult =
+        stage("total") {
+            processInner(message)
+        }
+
+    private fun processInner(message: TraceMessage.TraceBatchMessage): BatchResult {
         val meta = BatchMeta.of(message)
         val batchId = meta.batchId
 
         // 1. 墓碑：Redis 不可用时**抛出**（不 ack、退避重试）——隐私优先，
         //    绝不能因为 Redis 抖动把已删用户的数据写回去（08 §7「宁严不宽」）
-        if (tombstone.has(userId = message.userId)) {
+        if (stage("tombstone") { tombstone.has(userId = message.userId) }) {
             log.info(
                 "processor 墓碑命中，整批丢弃 batchId={} deviceId={} userId={} points={}",
                 message.batchId,
@@ -113,7 +138,7 @@ class BatchPipeline(
         var wm: Long? = null
         var watermarkReadable = true
         try {
-            wm = watermark.maxSeenTs(deviceId = message.deviceId)
+            wm = stage("watermark") { watermark.maxSeenTs(deviceId = message.deviceId) }
         } catch (ex: Exception) {
             // 降级：宁可不判迟到，也不能把正常批误判为迟到而跳过分段（段会永久缺失）
             watermarkReadable = false
@@ -127,7 +152,7 @@ class BatchPipeline(
         val late = watermarkReadable && wm != null && meta.minTsMs < wm - props.watermarkDriftMs
         if (watermarkReadable) {
             try {
-                watermark.writeIfGreater(meta.deviceId, meta.maxTsMs)
+                stage("watermark") { watermark.writeIfGreater(meta.deviceId, meta.maxTsMs) }
             } catch (ex: Exception) {
                 log.warn(
                     "processor 水位推进失败（本批继续，下一批可能重复判迟到） batchId={} deviceId={} cause={}",
@@ -149,16 +174,19 @@ class BatchPipeline(
         )
 
         // 3. 清洗（跨批 lastKept 状态；被丢的点不入库）
-        //    设备状态每批只取一次：清洗与分段共用同一份内存状态，避免两处 getOrLoad 之间被 LRU 淘汰
-        //    （淘汰会先把 OPEN 窗口落库再丢状态，此时清洗刚写回的 lastKept 就白丢了）
-        val state = deviceState.getOrLoad(deviceId = meta.deviceId)
-        val cleaned =
-            cleaner.clean(
-                points = message.pointsList,
-                meta = meta,
-                state = state,
-                nowMs = System.currentTimeMillis(),
-            )
+        val (state, cleaned) =
+            stage("clean") {
+                // 设备状态每批只取一次：清洗与分段共用同一份内存状态，避免两处 getOrLoad 之间被 LRU 淘汰
+                // （淘汰会先把 OPEN 窗口落库再丢状态，此时清洗刚写回的 lastKept 就白丢了）
+                val state = deviceState.getOrLoad(deviceId = meta.deviceId)
+                state to
+                    cleaner.clean(
+                        points = message.pointsList,
+                        meta = meta,
+                        state = state,
+                        nowMs = System.currentTimeMillis(),
+                    )
+            }
         log.debug(
             "processor 清洗完成 batchId={} deviceId={} in={} kept={} dropped={}",
             message.batchId,
@@ -169,7 +197,7 @@ class BatchPipeline(
         )
 
         // 4. 重算锁：Redis 读，**放在事务外**——不能在 DB 事务里夹一次 Redis 往返（会把事务拖长）
-        val recalcLocked = recalcGuard.isLocked(meta.userId)
+        val recalcLocked = stage("recalc_guard") { recalcGuard.isLocked(meta.userId) }
         val skipSegments = late || recalcLocked
         val days = if (skipSegments) meta.coveredUtcDays() else emptyList()
 
@@ -182,24 +210,29 @@ class BatchPipeline(
         //
         // 语义不变：点与段要么一起提交、要么一起回滚，重放由 pointId / segmentId 的确定性派生吸收。
         val segments =
-            transaction {
-                if (cleaned.isNotEmpty()) {
-                    val rows = pointsWriter.batchInsertIgnore(cleaned.points)
-                    log.debug(
-                        "processor 轨迹点写入完成 batchId={} deviceId={} rows={} kept={}",
-                        message.batchId,
-                        meta.deviceId,
-                        rows,
-                        cleaned.points.size,
-                    )
-                }
-                if (skipSegments) {
-                    // 迟到 / 重算锁：分段交给离线重算，但补偿登记必须先落库，否则段永久缺失
-                    dirtyDay.enqueue(meta.userId, days, DirtyDayReason.LATE_DATA)
-                    0
-                } else {
-                    // 6. 在线分段（每批 flush，尾段 OPEN；切分时闭合并落 FINALIZED）
-                    segmenter.onBatch(meta, cleaned.points, wm, state)
+            stage("db_txn") {
+                transaction {
+                    if (cleaned.isNotEmpty()) {
+                        val rows =
+                            stage("db_points") {
+                                pointsWriter.batchInsertIgnore(cleaned.points)
+                            }
+                        log.debug(
+                            "processor 轨迹点写入完成 batchId={} deviceId={} rows={} kept={}",
+                            message.batchId,
+                            meta.deviceId,
+                            rows,
+                            cleaned.points.size,
+                        )
+                    }
+                    if (skipSegments) {
+                        // 迟到 / 重算锁：分段交给离线重算，但补偿登记必须先落库，否则段永久缺失
+                        stage("db_dirty") { dirtyDay.enqueue(meta.userId, days, DirtyDayReason.LATE_DATA) }
+                        0
+                    } else {
+                        // 6. 在线分段（每批 flush，尾段 OPEN；切分时闭合并落 FINALIZED）
+                        stage("db_segment") { segmenter.onBatch(meta, cleaned.points, wm, state) }
+                    }
                 }
             }
 
@@ -224,7 +257,7 @@ class BatchPipeline(
                 )
             }
             // 点已落库、补偿已登记 → 该批在本服务的职责已结束，台账置 PROCESSED
-            batchStatus.markProcessed(batchId)
+            stage("status_enqueue") { batchStatus.markProcessed(batchId) }
             return BatchResult(
                 pointsIn = message.pointsCount,
                 kept = cleaned.points.size,
@@ -237,7 +270,7 @@ class BatchPipeline(
         }
 
         // 7. 批状态（异步缓冲，失败只记日志，不影响 ack；刻意留在事务外，不反压主链路）
-        batchStatus.markProcessed(batchId)
+        stage("status_enqueue") { batchStatus.markProcessed(batchId) }
         log.debug(
             "processor 批状态置 PROCESSED batchId={} deviceId={} segments={}",
             message.batchId,

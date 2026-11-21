@@ -1,0 +1,42 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 680 240" width="680" height="240" font-family="-apple-system, BlinkMacSystemFont, 'PingFang SC', 'Helvetica Neue', sans-serif">
+  <rect width="680" height="240" fill="#ffffff"/>
+
+  <!-- 标题 -->
+  <text x="70" y="24" font-size="13" font-weight="600" fill="#0f172a">PG 还有 4.6 倍余量：应用只用了 22% 的写事务能力</text>
+  <text x="70" y="40" font-size="11" fill="#64748b">同表同索引、每事务 30 行、4 并发（pgbench 探针表）vs 应用 4 线程实测</text>
+
+  <!-- 刻度：x 200–630 → 430px / 180k 点每秒 = 2.389px/k -->
+  <g stroke="#e2e8f0" stroke-width="1">
+    <line x1="200" y1="60" x2="200" y2="196"/>
+    <line x1="287.2" y1="60" x2="287.2" y2="196"/>
+    <line x1="374.3" y1="60" x2="374.3" y2="196"/>
+    <line x1="461.5" y1="60" x2="461.5" y2="196"/>
+    <line x1="548.6" y1="60" x2="548.6" y2="196"/>
+    <line x1="200" y1="60" x2="200" y2="196"/>
+  </g>
+  <g font-size="10" fill="#94a3b8" text-anchor="middle">
+    <text x="200" y="210">0</text>
+    <text x="287" y="210">30k</text>
+    <text x="374" y="210">60k</text>
+    <text x="462" y="210">90k</text>
+    <text x="549" y="210">120k</text>
+    <text x="636" y="210">150k</text>
+  </g>
+
+  <!-- PG sync=off 175,710 → 419.8px -->
+  <rect x="200" y="70" width="419.8" height="26" fill="#cbd5e1"/>
+  <text x="150" y="87" font-size="11" fill="#475569" text-anchor="end">PG sync=off</text>
+  <text x="560" y="87" font-size="10" fill="#334155">175,710 点/s</text>
+
+  <!-- PG sync=on 67,350 → 160.9px -->
+  <rect x="200" y="116" width="160.9" height="26" fill="#2563eb"/>
+  <text x="150" y="133" font-size="11" font-weight="600" fill="#1e40af" text-anchor="end">PG 上限</text>
+  <text x="372" y="133" font-size="10" font-weight="600" fill="#1e40af">67,350 点/s（2,245 TPS）</text>
+
+  <!-- 应用 14,713 → 35.1px -->
+  <rect x="200" y="162" width="35.1" height="26" fill="#dc2626"/>
+  <text x="150" y="179" font-size="11" font-weight="600" fill="#b91c1c" text-anchor="end">应用现状</text>
+  <text x="245" y="179" font-size="10" font-weight="600" fill="#b91c1c">14,713 点/s（490 TPS，仅 22%）</text>
+
+  <text x="630" y="232" font-size="10" fill="#94a3b8" text-anchor="end">单事务批量写 50 万行 ≈ 125 万点/s，未按比例画出；pgbench 同 30 行单语句延迟 1.78ms vs 逐行 43.5ms</text>
+</svg>

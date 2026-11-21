@@ -40,6 +40,19 @@ class TraceBatchListener(
 ) {
     private val log = LoggerFactory.getLogger(javaClass)
 
+    /** 分段计时包装（与 [BatchPipeline.stage] 同口径）：异常也计入耗时。 */
+    private inline fun <T> stage(
+        name: String,
+        block: () -> T,
+    ): T {
+        val start = System.nanoTime()
+        try {
+            return block()
+        } finally {
+            metrics.stage(name, System.nanoTime() - start)
+        }
+    }
+
     /**
      * 单批消费。异常语义（08 §11）：
      * - protobuf 解析失败 / 批头非法：**确定性失败** → 投 DLQ + ack（不能抛出，抛出会被当成
@@ -73,7 +86,7 @@ class TraceBatchListener(
 
         val message =
             try {
-                TraceMessage.TraceBatchMessage.parseFrom(payload)
+                stage("decode") { TraceMessage.TraceBatchMessage.parseFrom(payload) }
             } catch (e: InvalidProtocolBufferException) {
                 // 确定性失败：同一串字节重投多少次都一样 → 进 DLQ 留证据，再 ack 放过该分区
                 log.error(
